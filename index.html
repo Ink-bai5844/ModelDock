@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#080b0b" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta
+      name="description"
+      content="ModelDock — 统一连接、切换与管理多种 AI 模型 API。"
+    />
+    <script>
+      (() => {
+        try {
+          const isTheme = (value) => value === "light" || value === "dark";
+          let accountTheme = null;
+          try {
+            const cachedAccount = JSON.parse(
+              localStorage.getItem("modeldock.account-theme-cache") || "null",
+            );
+            if (
+              typeof cachedAccount?.accountId === "string" &&
+              cachedAccount.accountId.length > 0 &&
+              isTheme(cachedAccount.theme)
+            ) {
+              accountTheme = cachedAccount.theme;
+            }
+          } catch {
+            accountTheme = null;
+          }
+          const authTheme = localStorage.getItem("modeldock.auth.theme");
+          const legacyTheme = localStorage.getItem("modeldock-theme");
+          const theme = accountTheme ??
+            (isTheme(authTheme) ? authTheme : null) ??
+            (isTheme(legacyTheme) ? legacyTheme : null) ??
+            (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+          const accent = localStorage.getItem("modeldock-accent") || "lime";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.dataset.accent = accent;
+          document.documentElement.style.colorScheme = theme;
+        } catch {
+          document.documentElement.dataset.theme = "dark";
+          document.documentElement.dataset.accent = "lime";
+          document.documentElement.style.colorScheme = "dark";
+        }
+      })();
+    </script>
+    <title>ModelDock</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

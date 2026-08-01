@@ -1,0 +1,34 @@
+# Dependencies and package-manager cache
+node_modules/
+.pnpm-store/
+
+# Build and test output
+dist/
+dist-server/
+coverage/
+*.tsbuildinfo
+.vite/
+
+# Runtime data and local configuration
+data/
+config.json
+.env
+.env.*
+!.env.example
+
+# Local deployment artifacts and editor/agent tooling
+.deploy/
+.opencode/
+.agents/
+.codex/
+
+# Logs and temporary files
+*.log
+*.pid
+*.tmp
+*.tar
+*.tar.gz
+*.zip
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,23 @@
+{
+  "onlineMode": false,
+  "adminUsername": "admin",
+  "dataDirectory": "./data",
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "modeldock",
+    "user": "modeldock",
+    "passwordEnvironmentVariable": "MODELDOCK_MYSQL_PASSWORD"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3000,
+    "sessionHours": 24,
+    "secureCookies": false,
+    "allowedOrigins": [
+      "http://127.0.0.1:4173",
+      "http://localhost:4173"
+    ]
+  }
+}
+
