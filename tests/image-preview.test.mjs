@@ -20,6 +20,27 @@ test("chat images open an accessible full-image preview instead of downloading",
   );
 });
 
+test("phone layouts hide the preview scrim hint without removing the image button", () => {
+  assert.match(
+    cssSource,
+    /\.message-media-zoom-hint\s*\{[\s\S]*?opacity:\s*0;[\s\S]*?transform:\s*translateY\(-4px\)/,
+  );
+  assert.match(
+    cssSource,
+    /\.message-media-image:hover \.message-media-zoom-hint,[\s\S]*?\.message-media-image:focus-visible \.message-media-zoom-hint/,
+  );
+  assert.match(
+    cssSource,
+    /@media \(max-width: 620px\) \{[\s\S]*?\.message-media-zoom-hint\s*\{\s*display:\s*none;/,
+  );
+  assert.match(
+    cssSource,
+    /@media \(max-width: 620px\) \{[\s\S]*?\.message-media-image\s*\{\s*touch-action:\s*manipulation;/,
+  );
+  assert.match(appSource, /className="message-media message-media-image"/);
+  assert.match(appSource, /onClick=\{\(\) => onPreviewImage\(attachment\)\}/);
+});
+
 test("preview owns the explicit image download action", () => {
   assert.match(appSource, /DownloadSimple/);
   assert.match(appSource, /下载原图/);

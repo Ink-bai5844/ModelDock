@@ -7502,8 +7502,11 @@ kbd {
   }
 
   .message-media-zoom-hint {
-    opacity: 1;
-    transform: none;
+    display: none;
+  }
+
+  .message-media-image {
+    touch-action: manipulation;
   }
 
   .image-preview-scrim {
