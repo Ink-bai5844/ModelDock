@@ -133,25 +133,4 @@ export const INITIAL_CUSTOM_MAPPING_TEMPLATES: CustomMappingTemplate[] = [
     suggestedModel: "gpt-5.6",
     mapping: responsesApiMapping("edit"),
   },
-  {
-    id: "builtin-ccode-image-generate",
-    name: "ccode.vip · GPT Image 2 Fast · 生图",
-    description:
-      "ccode.vip 的 OpenAI Image API 兼容生成端点，仅使用其文档声明的基础字段。",
-    endpoint: "https://api.ccode.vip/v1",
-    suggestedModel: "gpt-image-2",
-    mapping: imageApiMapping("generations"),
-  },
-  {
-    id: "builtin-ccode-image-edit",
-    name: "ccode.vip · GPT Image 2 Fast · 编辑图",
-    description:
-      "POST /v1/images/edits，使用 multipart/form-data 在 image 字段上传一张或多张参考图。",
-    endpoint: "https://api.ccode.vip/v1",
-    suggestedModel: "gpt-image-2",
-    mapping: {
-      ...imageApiMapping("edits"),
-      requestAttachmentsField: "image",
-    },
-  },
 ];

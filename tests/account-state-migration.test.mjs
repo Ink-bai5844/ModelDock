@@ -8,7 +8,7 @@ import test from "node:test";
 
 const require = createRequire(import.meta.url);
 
-test("accounts marked version 4 still receive the missing ccode image edit template", async () => {
+test("new accounts omit ccode templates while existing template lists stay unchanged", async () => {
   const outputDirectory = await mkdtemp(join(tmpdir(), "modeldock-state-test-"));
   try {
     await writeFile(
@@ -37,33 +37,48 @@ test("accounts marked version 4 still receive the missing ccode image edit templ
     const { createDefaultAppState, normalizeAppState } = require(
       join(outputDirectory, "accountState.js"),
     );
-    const staleAccountState = createDefaultAppState();
-    staleAccountState.version = 4;
-    staleAccountState.customMappingTemplates =
-      staleAccountState.customMappingTemplates.filter(
-        (template) => template.id !== "builtin-ccode-image-edit",
-      );
-
-    const migrated = normalizeAppState(staleAccountState);
-
-    assert.ok(
-      migrated.customMappingTemplates.some(
-        (template) => template.id === "builtin-ccode-image-edit",
-      ),
-      "version 4 account should receive the missing built-in template",
+    const newAccount = createDefaultAppState();
+    assert.deepEqual(
+      newAccount.customMappingTemplates.map((template) => template.id),
+      [
+        "builtin-openai-image-generate",
+        "builtin-openai-responses-generate",
+        "builtin-openai-image-edit",
+        "builtin-openai-responses-edit",
+      ],
     );
 
-    migrated.deletedBuiltInTemplateIds = ["builtin-ccode-image-edit"];
-    migrated.customMappingTemplates = migrated.customMappingTemplates.filter(
-      (template) => template.id !== "builtin-ccode-image-edit",
+    const existingAccount = createDefaultAppState();
+    existingAccount.version = 4;
+    existingAccount.customMappingTemplates.push(
+      {
+        ...structuredClone(existingAccount.customMappingTemplates[0]),
+        id: "builtin-ccode-image-generate",
+        name: "ccode.vip · GPT Image 2 Fast · 生图",
+      },
+      {
+        ...structuredClone(existingAccount.customMappingTemplates[2]),
+        id: "builtin-ccode-image-edit",
+        name: "ccode.vip · GPT Image 2 Fast · 编辑图",
+      },
     );
-    const deliberatelyDeleted = normalizeAppState(migrated);
-    assert.equal(
-      deliberatelyDeleted.customMappingTemplates.some(
-        (template) => template.id === "builtin-ccode-image-edit",
-      ),
-      false,
-      "an explicitly deleted built-in template should stay deleted",
+    const existingIds = existingAccount.customMappingTemplates.map(
+      (template) => template.id,
+    );
+    const normalizedExisting = normalizeAppState(existingAccount);
+    assert.deepEqual(
+      normalizedExisting.customMappingTemplates.map((template) => template.id),
+      existingIds,
+      "an existing account must keep its saved templates",
+    );
+
+    const existingWithoutCcode = createDefaultAppState();
+    existingWithoutCcode.version = 4;
+    const normalizedWithoutCcode = normalizeAppState(existingWithoutCcode);
+    assert.deepEqual(
+      normalizedWithoutCcode.customMappingTemplates.map((template) => template.id),
+      existingWithoutCcode.customMappingTemplates.map((template) => template.id),
+      "normalization must not add ccode templates to an existing account",
     );
   } finally {
     await rm(outputDirectory, { recursive: true, force: true });

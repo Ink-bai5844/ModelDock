@@ -254,26 +254,10 @@ export function normalizeAppState(value: unknown): PersistedAppState {
         (id): id is string => typeof id === "string" && id.startsWith("builtin-"),
       )
     : [];
-  let customMappingTemplates = normalizeMappingTemplates(
+  const customMappingTemplates = normalizeMappingTemplates(
     stored.customMappingTemplates,
     defaults.customMappingTemplates,
   );
-  if (
-    !deletedBuiltInTemplateIds.includes("builtin-ccode-image-edit") &&
-    !customMappingTemplates.some(
-      (template) => template.id === "builtin-ccode-image-edit",
-    )
-  ) {
-    const ccodeEditTemplate = defaults.customMappingTemplates.find(
-      (template) => template.id === "builtin-ccode-image-edit",
-    );
-    if (ccodeEditTemplate) {
-      customMappingTemplates = [
-        ...customMappingTemplates,
-        structuredClone(ccodeEditTemplate),
-      ];
-    }
-  }
   return {
     ...defaults,
     ...stored,

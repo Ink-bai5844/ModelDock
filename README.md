@@ -94,16 +94,15 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 
 自定义协议支持“手动配置”和“映射模板”两种方式。模板可以新增、修改、另存和删除，并保存当前 Base URL、推荐模型与全部映射字段。
 
-新账号默认包含六个模板：
+新账号默认包含四个 OpenAI 官方模板：
 
 1. OpenAI Image API 生图
 2. OpenAI Responses API 生图
 3. OpenAI Image API 编辑图
 4. OpenAI Responses API 编辑图
-5. ccode.vip GPT Image 2 Fast 生图
-6. ccode.vip GPT Image 2 Fast 编辑图
 
 选择“不使用模板”不会清空当前配置，可以继续单独修改并只保存到当前 API 端点。
+已有账号会原样保留自己已经保存的模板；升级不会自动删除或补充模板。
 
 ### 外观与交互
 
