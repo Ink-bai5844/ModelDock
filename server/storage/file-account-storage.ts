@@ -109,6 +109,30 @@ export class FileAccountStorage implements AccountStorage {
     });
   }
 
+  async updateWorkspaceQuota(
+    userId: string,
+    quotaBytes: number,
+  ): Promise<AccountRecord> {
+    return this.serialized(async () => {
+      const index = await this.readIndex();
+      const accountIndex = index.accounts.findIndex(
+        (account) => account.id === userId,
+      );
+      if (accountIndex < 0) {
+        throw new AppError(404, "ACCOUNT_NOT_FOUND", "没有找到这个账号。");
+      }
+      const accounts = [...index.accounts];
+      const account = {
+        ...accounts[accountIndex],
+        workspaceQuotaBytes: quotaBytes,
+        updatedAt: new Date().toISOString(),
+      };
+      accounts[accountIndex] = account;
+      await this.atomicWrite(this.accountsPath, { ...index, accounts } satisfies AccountIndex);
+      return account;
+    });
+  }
+
   async deleteAccount(userId: string): Promise<void> {
     await this.serialized(async () => {
       const index = await this.readIndex();

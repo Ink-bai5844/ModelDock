@@ -18,6 +18,11 @@
       "http://127.0.0.1:4173",
       "http://localhost:4173"
     ]
+  },
+  "skills": {
+    "enabled": false,
+    "directory": "./data/skills",
+    "pythonExecutable": "python",
+    "allowScriptExecution": false
   }
 }
-

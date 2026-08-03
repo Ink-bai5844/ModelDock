@@ -26,6 +26,7 @@ export interface ModelOption {
   capability: string;
   inputTypes: ModelInputType[];
   supportsReasoning?: boolean;
+  supportsAgent?: boolean;
 }
 
 export interface ModelGroup {
@@ -46,6 +47,7 @@ export interface CatalogModel {
   capability: string;
   inputTypes: ModelInputType[];
   supportsReasoning?: boolean;
+  supportsAgent?: boolean;
 }
 
 export interface ApiConfig {
@@ -126,6 +128,30 @@ export interface ChatMessage {
   attachments?: ChatAttachment[];
   author?: string;
   meta?: string;
+  skill?: {
+    id: string;
+    name: string;
+  };
+  agentSteps?: AgentStep[];
+}
+
+export interface AgentStep {
+  id: string;
+  tool:
+    | "agent"
+    | "reflect"
+    | "skill_context"
+    | "deactivate_skill"
+    | "list_files"
+    | "read_file"
+    | "write_file"
+    | "search_files"
+    | "delete_file"
+    | "package_files"
+    | "web_search";
+  label: string;
+  detail?: string;
+  status: "running" | "completed" | "failed";
 }
 
 export interface ConversationRecord {
@@ -138,9 +164,25 @@ export interface ConversationRecord {
   modelName: string;
   providerName: string;
   messages: ChatMessage[];
+  activeSkillIds?: string[];
+  agentEnabled?: boolean;
+  webSearchEnabled?: boolean;
 }
 
 export interface AuthUser {
   id: string;
   username: string;
+}
+
+export type SkillInvocationPolicy = "always" | "auto" | "manual";
+
+export interface LocalSkillDescriptor {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string;
+  defaultInvocationPolicy: SkillInvocationPolicy;
+  requiresLocalExecution: boolean;
+  runtimeReady: boolean;
+  capabilities: Array<"instructions" | "private-memory">;
 }

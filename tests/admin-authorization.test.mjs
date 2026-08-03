@@ -73,6 +73,18 @@ test("only the configured administrator can list and delete other accounts", asy
     );
     assert.equal("password" in accounts[0], false);
     assert.equal("vaultSalt" in accounts[0], false);
+    assert.equal(accounts[0].workspaceQuotaBytes, 100 * 1024 * 1024);
+
+    const resized = await vault.updateWorkspaceQuotaAsAdmin(
+      adminLogin.token,
+      member.user.id,
+      256 * 1024 * 1024,
+    );
+    assert.equal(resized.workspaceQuotaBytes, 256 * 1024 * 1024);
+    assert.equal(
+      (await storage.findById(member.user.id)).workspaceQuotaBytes,
+      256 * 1024 * 1024,
+    );
 
     await assert.rejects(
       () => vault.deleteAccountAsAdmin(adminLogin.token, admin.user.id),

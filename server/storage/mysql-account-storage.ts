@@ -8,7 +8,12 @@ import mysql, {
 import { decodeBase64 } from "../core/base64.js";
 import { AppError, StorageUnavailableError } from "../core/errors.js";
 import type { EncryptedDocument } from "../core/crypto.js";
-import type { AccountRecord, AccountStorage } from "./account-storage.js";
+import {
+  DEFAULT_WORKSPACE_QUOTA_BYTES,
+  normalizeWorkspaceQuotaBytes,
+  type AccountRecord,
+  type AccountStorage,
+} from "./account-storage.js";
 
 export interface MySqlAccountStorageOptions {
   host: string;
@@ -39,6 +44,7 @@ interface AccountRow extends RowDataPacket {
   password_salt: Buffer;
   password_hash: Buffer;
   vault_salt: Buffer;
+  workspace_quota_bytes: number | string;
   created_at: Date;
   updated_at: Date;
 }
@@ -60,6 +66,10 @@ interface ManifestRow extends RowDataPacket {
   source_manifest: string;
 }
 
+interface ColumnCountRow extends RowDataPacket {
+  count: number;
+}
+
 const ACCOUNT_COLUMNS = `
   id,
   username,
@@ -68,6 +78,7 @@ const ACCOUNT_COLUMNS = `
   password_salt,
   password_hash,
   vault_salt,
+  workspace_quota_bytes,
   created_at,
   updated_at
 `;
@@ -117,12 +128,14 @@ export class MySqlAccountStorage implements AccountStorage {
           password_salt VARBINARY(64) NOT NULL,
           password_hash VARBINARY(64) NOT NULL,
           vault_salt VARBINARY(64) NOT NULL,
+          workspace_quota_bytes BIGINT UNSIGNED NOT NULL DEFAULT 104857600,
           created_at DATETIME(3) NOT NULL,
           updated_at DATETIME(3) NOT NULL,
           PRIMARY KEY (id),
           UNIQUE KEY uq_modeldock_accounts_normalized_username (normalized_username)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
       `);
+      await this.ensureWorkspaceQuotaColumn();
       await this.pool.query(`
         CREATE TABLE IF NOT EXISTS modeldock_account_states (
           account_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -329,6 +342,32 @@ export class MySqlAccountStorage implements AccountStorage {
     }
   }
 
+  async updateWorkspaceQuota(
+    userId: string,
+    quotaBytes: number,
+  ): Promise<AccountRecord> {
+    try {
+      const now = new Date();
+      const [result] = await this.pool.execute<ResultSetHeader>(
+        `UPDATE modeldock_accounts
+         SET workspace_quota_bytes = ?, updated_at = ?
+         WHERE id = ?`,
+        [quotaBytes, now, userId],
+      );
+      if (result.affectedRows !== 1) {
+        throw new AppError(404, "ACCOUNT_NOT_FOUND", "没有找到这个账号。");
+      }
+      const account = await this.findById(userId);
+      if (!account) {
+        throw new AppError(404, "ACCOUNT_NOT_FOUND", "没有找到这个账号。");
+      }
+      return account;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw this.asStorageError(error);
+    }
+  }
+
   async deleteAccount(userId: string): Promise<void> {
     try {
       const [result] = await this.pool.execute<ResultSetHeader>(
@@ -444,9 +483,10 @@ export class MySqlAccountStorage implements AccountStorage {
          password_salt,
          password_hash,
          vault_salt,
+         workspace_quota_bytes,
          created_at,
          updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         account.id,
         account.username,
@@ -455,6 +495,7 @@ export class MySqlAccountStorage implements AccountStorage {
         decodeBase64(account.password.salt, "password salt", 16),
         decodeBase64(account.password.hash, "password hash", 32),
         decodeBase64(account.vaultSalt, "vault salt", 16),
+        normalizeWorkspaceQuotaBytes(account.workspaceQuotaBytes),
         new Date(account.createdAt),
         new Date(account.updatedAt),
       ],
@@ -515,7 +556,12 @@ export class MySqlAccountStorage implements AccountStorage {
         );
       }
       if (
-        !isDeepStrictEqual(this.accountFromRow(accountRows[0]), record.account) ||
+        !isDeepStrictEqual(this.accountFromRow(accountRows[0]), {
+          ...record.account,
+          workspaceQuotaBytes: normalizeWorkspaceQuotaBytes(
+            record.account.workspaceQuotaBytes,
+          ),
+        }) ||
         !isDeepStrictEqual(this.stateFromRow(stateRows[0]), record.state)
       ) {
         throw new AppError(
@@ -538,6 +584,9 @@ export class MySqlAccountStorage implements AccountStorage {
         hash: row.password_hash.toString("base64"),
       },
       vaultSalt: row.vault_salt.toString("base64"),
+      workspaceQuotaBytes: normalizeWorkspaceQuotaBytes(
+        Number(row.workspace_quota_bytes),
+      ),
       createdAt: row.created_at.toISOString(),
       updatedAt: row.updated_at.toISOString(),
     };
@@ -559,6 +608,23 @@ export class MySqlAccountStorage implements AccountStorage {
     } catch {
       throw new StorageUnavailableError();
     }
+  }
+
+  private async ensureWorkspaceQuotaColumn(): Promise<void> {
+    const [rows] = await this.pool.query<ColumnCountRow[]>(
+      `SELECT COUNT(*) AS count
+       FROM information_schema.columns
+       WHERE table_schema = DATABASE()
+         AND table_name = 'modeldock_accounts'
+         AND column_name = 'workspace_quota_bytes'`,
+    );
+    if (Number(rows[0]?.count ?? 0) > 0) return;
+    await this.pool.query(
+      `ALTER TABLE modeldock_accounts
+       ADD COLUMN workspace_quota_bytes BIGINT UNSIGNED NOT NULL
+       DEFAULT ${DEFAULT_WORKSPACE_QUOTA_BYTES}
+       AFTER vault_salt`,
+    );
   }
 
   private mysqlCode(error: unknown): string | undefined {

@@ -3,13 +3,18 @@ import {
   CircleNotch,
   Eye,
   EyeSlash,
+  FloppyDisk,
+  HardDrive,
   LockKey,
   MagnifyingGlass,
   Moon,
+  PencilSimple,
+  PuzzlePiece,
   ShieldCheck,
   SignOut,
   Sun,
   Trash,
+  UploadSimple,
   User,
   UsersThree,
   X,
@@ -23,13 +28,23 @@ import {
 import {
   ClientApiError,
   deleteAdminAccount,
+  deleteAdminSkill,
   getAdminSession,
   listAdminAccounts,
+  listAdminSkills,
   loginAdmin,
   logout,
+  installAdminSkill,
+  updateAdminSkill,
+  updateAdminSkillPolicy,
+  updateAdminWorkspaceQuota,
   type AdminAccountSummary,
 } from "./api";
 import type { ThemeMode } from "./accountState";
+import type {
+  LocalSkillDescriptor,
+  SkillInvocationPolicy,
+} from "./types";
 
 const ADMIN_THEME_STORAGE_KEY = "modeldock.admin.theme";
 
@@ -61,10 +76,23 @@ function initials(username: string): string {
   ).toLocaleUpperCase("zh-CN");
 }
 
+function formatStorageBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) {
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
 type AdminBootstrap =
   | { status: "loading" }
   | { status: "auth" }
-  | { status: "ready"; username: string; accounts: AdminAccountSummary[] }
+  | {
+      status: "ready";
+      username: string;
+      accounts: AdminAccountSummary[];
+      skills: LocalSkillDescriptor[];
+    }
   | { status: "error"; message: string };
 
 export function AdminApp() {
@@ -88,11 +116,15 @@ export function AdminApp() {
     setBootstrap({ status: "loading" });
     try {
       const user = await getAdminSession();
-      const accounts = await listAdminAccounts();
+      const [accounts, skills] = await Promise.all([
+        listAdminAccounts(),
+        listAdminSkills(),
+      ]);
       setBootstrap({
         status: "ready",
         username: user.username,
         accounts,
+        skills,
       });
     } catch (error) {
       if (
@@ -163,10 +195,16 @@ export function AdminApp() {
       theme={theme}
       username={bootstrap.username}
       accounts={bootstrap.accounts}
+      skills={bootstrap.skills}
       onToggleTheme={toggleTheme}
       onAccounts={(accounts) =>
         setBootstrap((current) =>
           current.status === "ready" ? { ...current, accounts } : current,
+        )
+      }
+      onSkills={(skills) =>
+        setBootstrap((current) =>
+          current.status === "ready" ? { ...current, skills } : current,
         )
       }
       onLogout={async () => {
@@ -309,23 +347,114 @@ interface AdminWorkspaceProps {
   theme: ThemeMode;
   username: string;
   accounts: AdminAccountSummary[];
+  skills: LocalSkillDescriptor[];
   onToggleTheme: () => void;
   onAccounts: (accounts: AdminAccountSummary[]) => void;
+  onSkills: (skills: LocalSkillDescriptor[]) => void;
   onLogout: () => Promise<void>;
+}
+
+function AdminQuotaControl({
+  account,
+  onSaved,
+  onToast,
+}: {
+  account: AdminAccountSummary;
+  onSaved: (account: AdminAccountSummary) => void;
+  onToast: (message: string) => void;
+}) {
+  const [megabytes, setMegabytes] = useState(
+    String(Math.round(account.workspaceQuotaBytes / (1024 * 1024))),
+  );
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setMegabytes(
+      String(Math.round(account.workspaceQuotaBytes / (1024 * 1024))),
+    );
+  }, [account.workspaceQuotaBytes]);
+
+  const parsedMegabytes = Number(megabytes);
+  const valid = Number.isInteger(parsedMegabytes) &&
+    parsedMegabytes >= 1 &&
+    parsedMegabytes <= 1_048_576;
+  const changed = valid &&
+    parsedMegabytes * 1024 * 1024 !== account.workspaceQuotaBytes;
+
+  const save = async () => {
+    if (!valid || !changed) return;
+    setSaving(true);
+    try {
+      const saved = await updateAdminWorkspaceQuota(
+        account.id,
+        parsedMegabytes * 1024 * 1024,
+      );
+      onSaved(saved);
+      onToast(`${account.username} 的工作区容量已更新`);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "工作区容量保存失败");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="admin-quota-control">
+      <div>
+        <span><HardDrive size={14} /> 工作区容量</span>
+        <small>
+          已用 {formatStorageBytes(account.workspaceUsedBytes)} / {formatStorageBytes(account.workspaceQuotaBytes)}
+        </small>
+      </div>
+      <label>
+        <span className="sr-only">{account.username} 的工作区容量（MB）</span>
+        <input
+          type="number"
+          min="1"
+          max="1048576"
+          step="1"
+          value={megabytes}
+          disabled={saving}
+          onChange={(event) => setMegabytes(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              void save();
+            }
+          }}
+          aria-invalid={!valid}
+        />
+        <em>MB</em>
+      </label>
+      <button
+        type="button"
+        disabled={!changed || saving}
+        onClick={() => void save()}
+        aria-label={`保存 ${account.username} 的工作区容量`}
+      >
+        {saving ? <CircleNotch className="spin" size={14} /> : <FloppyDisk size={14} />}
+      </button>
+    </div>
+  );
 }
 
 function AdminWorkspace({
   theme,
   username,
   accounts,
+  skills,
   onToggleTheme,
   onAccounts,
+  onSkills,
   onLogout,
 }: AdminWorkspaceProps) {
   const [query, setQuery] = useState("");
   const [deleting, setDeleting] = useState<AdminAccountSummary | null>(null);
+  const [deletingSkill, setDeletingSkill] = useState<LocalSkillDescriptor | null>(null);
   const [toast, setToast] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [uploadingSkill, setUploadingSkill] = useState<string | null>(null);
+  const [savingSkillPolicy, setSavingSkillPolicy] = useState<string | null>(null);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase("zh-CN");
     if (!normalized) return accounts;
@@ -343,12 +472,59 @@ function AdminWorkspace({
   const refresh = async () => {
     setRefreshing(true);
     try {
-      onAccounts(await listAdminAccounts());
-      setToast("账号列表已刷新");
+      const [nextAccounts, nextSkills] = await Promise.all([
+        listAdminAccounts(),
+        listAdminSkills(),
+      ]);
+      onAccounts(nextAccounts);
+      onSkills(nextSkills);
+      setToast("管理目录已刷新");
     } catch (error) {
       setToast(error instanceof Error ? error.message : "刷新失败");
     } finally {
       setRefreshing(false);
+    }
+  };
+
+  const uploadSkill = async (file: File, skillId?: string) => {
+    if (!file.name.toLocaleLowerCase("en-US").endsWith(".zip")) {
+      setToast("请选择 ZIP 格式的 Skill 成品包");
+      return;
+    }
+    if (file.size > 160 * 1024 * 1024) {
+      setToast("Skill 成品包不能超过 160 MB");
+      return;
+    }
+    setUploadingSkill(skillId ?? "new");
+    try {
+      const saved = skillId
+        ? await updateAdminSkill(skillId, file)
+        : await installAdminSkill(file);
+      onSkills([
+        ...skills.filter((skill) => skill.id !== saved.id),
+        saved,
+      ].sort((left, right) => left.displayName.localeCompare(right.displayName, "zh-CN")));
+      setToast(`${saved.displayName} 已${skillId ? "更新" : "安装"}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "Skill 成品包处理失败");
+    } finally {
+      setUploadingSkill(null);
+    }
+  };
+
+  const changeDefaultSkillPolicy = async (
+    skillId: string,
+    policy: SkillInvocationPolicy,
+  ) => {
+    setSavingSkillPolicy(skillId);
+    try {
+      const saved = await updateAdminSkillPolicy(skillId, policy);
+      onSkills(skills.map((skill) => skill.id === saved.id ? saved : skill));
+      setToast(`${saved.displayName} 的默认调用策略已更新`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "默认调用策略保存失败");
+    } finally {
+      setSavingSkillPolicy(null);
     }
   };
 
@@ -446,6 +622,7 @@ function AdminWorkspace({
           <div className="admin-account-list" aria-live="polite">
             <div className="admin-account-list-head" aria-hidden="true">
               <span>账号</span>
+              <span>工作区容量</span>
               <span>创建时间</span>
               <span>最近更新</span>
               <span>操作</span>
@@ -461,6 +638,13 @@ function AdminWorkspace({
                     </div>
                     {account.administrator && <em>管理员</em>}
                   </div>
+                  <AdminQuotaControl
+                    account={account}
+                    onSaved={(saved) => onAccounts(
+                      accounts.map((item) => item.id === saved.id ? saved : item),
+                    )}
+                    onToast={setToast}
+                  />
                   <time dateTime={account.createdAt}>
                     <small>创建时间</small>
                     {formatDate(account.createdAt)}
@@ -502,6 +686,113 @@ function AdminWorkspace({
             )}
           </div>
         </section>
+
+        <section className="admin-skills-panel" aria-labelledby="admin-skills-title">
+          <div className="admin-skills-toolbar">
+            <div>
+              <span className="eyebrow">SKILL CATALOG</span>
+              <h2 id="admin-skills-title">Skill目录</h2>
+              <p>统一维护所有账号可调用的 Skill，并设置账号首次使用时的默认调用策略。</p>
+            </div>
+            <label
+              className="admin-skill-upload primary"
+              aria-disabled={uploadingSkill !== null}
+            >
+              {uploadingSkill === "new" ? (
+                <CircleNotch className="spin" size={16} />
+              ) : (
+                <UploadSimple size={16} />
+              )}
+              {uploadingSkill === "new" ? "正在安装" : "安装 Skill"}
+              <input
+                type="file"
+                accept=".zip,application/zip"
+                disabled={uploadingSkill !== null}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  if (file) void uploadSkill(file);
+                }}
+              />
+            </label>
+          </div>
+
+          <div className="admin-skill-list" aria-live="polite">
+            {skills.length ? (
+              skills.map((skill) => (
+                <article className="admin-skill-row" key={skill.id}>
+                  <span className="admin-skill-icon" aria-hidden="true">
+                    <PuzzlePiece size={21} />
+                  </span>
+                  <div className="admin-skill-copy">
+                    <div>
+                      <strong>{skill.displayName}</strong>
+                      <code>${skill.name}</code>
+                    </div>
+                    <p>{skill.description}</p>
+                    <span className={skill.runtimeReady ? "ready" : "unavailable"}>
+                      {skill.runtimeReady ? "可供聊天调用" : "运行环境尚未就绪"}
+                    </span>
+                  </div>
+                  <label className="admin-skill-policy">
+                    <span>默认调用策略</span>
+                    <select
+                      value={skill.defaultInvocationPolicy}
+                      disabled={savingSkillPolicy !== null || uploadingSkill !== null}
+                      onChange={(event) => void changeDefaultSkillPolicy(
+                        skill.id,
+                        event.currentTarget.value as SkillInvocationPolicy,
+                      )}
+                      aria-label={`${skill.displayName} 的默认调用策略`}
+                    >
+                      <option value="always">始终调用</option>
+                      <option value="auto">智能判断</option>
+                      <option value="manual">仅手动</option>
+                    </select>
+                    {savingSkillPolicy === skill.id && (
+                      <CircleNotch className="spin" size={14} aria-label="保存中" />
+                    )}
+                  </label>
+                  <div className="admin-skill-actions">
+                    <label aria-disabled={uploadingSkill !== null}>
+                      {uploadingSkill === skill.id ? (
+                        <CircleNotch className="spin" size={16} />
+                      ) : (
+                        <PencilSimple size={16} />
+                      )}
+                      {uploadingSkill === skill.id ? "更新中" : "更新"}
+                      <input
+                        type="file"
+                        accept=".zip,application/zip"
+                        disabled={uploadingSkill !== null}
+                        onChange={(event) => {
+                          const file = event.currentTarget.files?.[0];
+                          event.currentTarget.value = "";
+                          if (file) void uploadSkill(file, skill.id);
+                        }}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={uploadingSkill !== null}
+                      onClick={() => setDeletingSkill(skill)}
+                      aria-label={`删除 Skill ${skill.displayName}`}
+                    >
+                      <Trash size={16} />
+                      删除
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <div className="admin-skill-empty">
+                <PuzzlePiece size={22} />
+                <strong>还没有安装 Skill</strong>
+                <span>上传 ZIP 成品包后，它会出现在所有账号的 Skill目录中。</span>
+              </div>
+            )}
+          </div>
+        </section>
       </main>
 
       {deleting && (
@@ -518,7 +809,102 @@ function AdminWorkspace({
           }}
         />
       )}
+      {deletingSkill && (
+        <AdminDeleteSkillDialog
+          skill={deletingSkill}
+          onClose={() => setDeletingSkill(null)}
+          onDelete={async () => {
+            const deleted = await deleteAdminSkill(deletingSkill.id);
+            onSkills(skills.filter((skill) => skill.id !== deleted.id));
+            setDeletingSkill(null);
+            setToast(`Skill ${deleted.displayName} 已删除`);
+          }}
+        />
+      )}
       {toast && <div className="toast admin-toast">{toast}</div>}
+    </div>
+  );
+}
+
+interface AdminDeleteSkillDialogProps {
+  skill: LocalSkillDescriptor;
+  onClose: () => void;
+  onDelete: () => Promise<void>;
+}
+
+function AdminDeleteSkillDialog({
+  skill,
+  onClose,
+  onDelete,
+}: AdminDeleteSkillDialogProps) {
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const confirmed = confirmation === skill.name;
+
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !submitting) onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose, submitting]);
+
+  return (
+    <div
+      className="admin-delete-scrim"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        className="admin-delete-dialog"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="admin-delete-skill-title"
+        aria-describedby="admin-delete-skill-description"
+      >
+        <div className="admin-delete-heading">
+          <span><Trash size={20} /></span>
+          <div>
+            <span className="eyebrow">DELETE SKILL</span>
+            <h2 id="admin-delete-skill-title">删除 {skill.displayName}？</h2>
+          </div>
+        </div>
+        <p id="admin-delete-skill-description">
+          删除后，所有账号都无法再从聊天框调用这个 Skill。此操作无法撤销。
+        </p>
+        <label>
+          <span>输入 <strong>{skill.name}</strong> 确认</span>
+          <input
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+            autoComplete="off"
+            autoFocus
+          />
+        </label>
+        {error && <div className="admin-delete-error" role="alert">{error}</div>}
+        <div className="admin-delete-actions">
+          <button onClick={onClose} disabled={submitting}>取消</button>
+          <button
+            className="danger"
+            disabled={!confirmed || submitting}
+            onClick={async () => {
+              setError("");
+              setSubmitting(true);
+              try {
+                await onDelete();
+              } catch (deleteError) {
+                setError(deleteError instanceof Error ? deleteError.message : "Skill 删除失败。");
+                setSubmitting(false);
+              }
+            }}
+          >
+            {submitting ? <CircleNotch className="spin" size={16} /> : <Trash size={16} />}
+            {submitting ? "正在删除" : "永久删除"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

@@ -16,6 +16,15 @@ config.json
 .env.*
 !.env.example
 
+# Sensitive files must stay outside the public repository even if misplaced
+*.key
+*.pem
+*.p12
+*.pfx
+*.sqlite3
+*.sqlite3-*
+*.enc
+
 # Local deployment artifacts and editor/agent tooling
 .deploy/
 .opencode/
@@ -31,4 +40,3 @@ config.json
 *.zip
 .DS_Store
 Thumbs.db
-

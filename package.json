@@ -12,6 +12,7 @@
     "server": "node dist-server/index.js",
     "start": "node dist-server/index.js",
     "migrate:mysql": "node scripts/migrate-files-to-mysql.mjs",
+    "encrypt:skill-memory": "npm run server:build && node scripts/encrypt-skill-memory.mjs",
     "test": "node --test tests/*.test.mjs",
     "preview": "vite preview"
   },

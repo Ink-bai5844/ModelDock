@@ -191,6 +191,7 @@ export function ModelCatalogWorkspace({
       capability: "通用",
       inputTypes: ["text"],
       supportsReasoning: false,
+      supportsAgent: false,
     };
     onChange([...models, next], groups);
     setSelectedModelId(next.id);
@@ -418,6 +419,7 @@ export function ModelCatalogWorkspace({
                         <small>{model.description}</small>
                         <span className="catalog-model-modalities">
                           {model.supportsReasoning && <em>思考</em>}
+                          {model.supportsAgent && <em>Agent</em>}
                           {model.inputTypes.map((type) => (
                             <em key={type}>{MODEL_INPUT_TYPE_LABELS[type]}</em>
                           ))}
@@ -580,6 +582,32 @@ export function ModelCatalogWorkspace({
                       <CheckCircle
                         size={17}
                         weight={selectedModel.supportsReasoning ? "fill" : "regular"}
+                      />
+                    </label>
+                    <label
+                      className={`catalog-reasoning-toggle catalog-agent-toggle ${
+                        selectedModel.supportsAgent ? "selected" : ""
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedModel.supportsAgent ?? false}
+                        onChange={(event) =>
+                          patchModel({ supportsAgent: event.target.checked })
+                        }
+                      />
+                      <span className="catalog-reasoning-icon">
+                        <Robot size={17} />
+                      </span>
+                      <span>
+                        <strong>Agent 工具调用</strong>
+                        <small>
+                          允许模型在对话中主动循环调用 Skill、规划工具与账号数据工作区工具。
+                        </small>
+                      </span>
+                      <CheckCircle
+                        size={17}
+                        weight={selectedModel.supportsAgent ? "fill" : "regular"}
                       />
                     </label>
                     <label>
