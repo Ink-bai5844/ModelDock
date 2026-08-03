@@ -19,6 +19,12 @@ export interface ModelDockConfig {
     secureCookies: boolean;
     allowedOrigins: string[];
   };
+  skills: {
+    enabled: boolean;
+    directory: string;
+    pythonExecutable: string;
+    allowScriptExecution: boolean;
+  };
 }
 
 export function readRequiredEnvironmentVariable(name: string): string {
@@ -46,6 +52,12 @@ const DEFAULT_CONFIG: ModelDockConfig = {
     sessionHours: 24,
     secureCookies: false,
     allowedOrigins: ["http://127.0.0.1:4173", "http://localhost:4173"],
+  },
+  skills: {
+    enabled: false,
+    directory: "./data/skills",
+    pythonExecutable: "python",
+    allowScriptExecution: false,
   },
 };
 
@@ -104,6 +116,29 @@ export async function loadConfig(projectRoot: string): Promise<ModelDockConfig> 
         raw.server?.secureCookies ?? DEFAULT_CONFIG.server.secureCookies,
       ),
       allowedOrigins: raw.server?.allowedOrigins ?? DEFAULT_CONFIG.server.allowedOrigins,
+    },
+    skills: {
+      ...DEFAULT_CONFIG.skills,
+      ...raw.skills,
+      enabled:
+        readBooleanEnvironmentVariable(
+          "MODELDOCK_SKILLS_ENABLED",
+          raw.skills?.enabled ?? DEFAULT_CONFIG.skills.enabled,
+        ),
+      pythonExecutable:
+        process.env.MODELDOCK_SKILLS_PYTHON ??
+        raw.skills?.pythonExecutable ??
+        DEFAULT_CONFIG.skills.pythonExecutable,
+      allowScriptExecution:
+        readBooleanEnvironmentVariable(
+          "MODELDOCK_SKILLS_ALLOW_SCRIPT_EXECUTION",
+          raw.skills?.allowScriptExecution ??
+            DEFAULT_CONFIG.skills.allowScriptExecution,
+        ),
+      directory:
+        process.env.MODELDOCK_SKILLS_DIRECTORY ??
+        raw.skills?.directory ??
+        DEFAULT_CONFIG.skills.directory,
     },
   };
 }

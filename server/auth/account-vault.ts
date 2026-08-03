@@ -8,7 +8,14 @@ import {
   verifyPassword,
 } from "../core/crypto.js";
 import { AppError } from "../core/errors.js";
-import type { AccountRecord, AccountStorage } from "../storage/account-storage.js";
+import {
+  DEFAULT_WORKSPACE_QUOTA_BYTES,
+  MAX_WORKSPACE_QUOTA_BYTES,
+  MIN_WORKSPACE_QUOTA_BYTES,
+  normalizeWorkspaceQuotaBytes,
+  type AccountRecord,
+  type AccountStorage,
+} from "../storage/account-storage.js";
 import { SessionManager, type SessionContext } from "./session-manager.js";
 
 export interface AuthResult {
@@ -25,6 +32,7 @@ export interface AdminAccountSummary {
   createdAt: string;
   updatedAt: string;
   administrator: boolean;
+  workspaceQuotaBytes: number;
 }
 
 export class AccountVault {
@@ -58,6 +66,7 @@ export class AccountVault {
       normalizedUsername,
       password: passwordDigest,
       vaultSalt,
+      workspaceQuotaBytes: DEFAULT_WORKSPACE_QUOTA_BYTES,
       createdAt: now,
       updatedAt: now,
     };
@@ -135,7 +144,52 @@ export class AccountVault {
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
       administrator: account.id === admin.id,
+      workspaceQuotaBytes: normalizeWorkspaceQuotaBytes(
+        account.workspaceQuotaBytes,
+      ),
     }));
+  }
+
+  async getWorkspaceQuotaForAccount(accountId: string): Promise<number> {
+    const account = await this.storage.findById(accountId);
+    if (!account) {
+      throw new AppError(404, "ACCOUNT_NOT_FOUND", "没有找到这个账号。");
+    }
+    return normalizeWorkspaceQuotaBytes(account.workspaceQuotaBytes);
+  }
+
+  async updateWorkspaceQuotaAsAdmin(
+    token: string | undefined,
+    targetUserId: string,
+    quotaBytes: unknown,
+  ): Promise<AdminAccountSummary> {
+    const admin = await this.getAdminSession(token);
+    if (
+      typeof quotaBytes !== "number" ||
+      !Number.isSafeInteger(quotaBytes) ||
+      quotaBytes < MIN_WORKSPACE_QUOTA_BYTES ||
+      quotaBytes > MAX_WORKSPACE_QUOTA_BYTES
+    ) {
+      throw new AppError(
+        400,
+        "INVALID_WORKSPACE_QUOTA",
+        "工作区容量必须为 1 MB 至 1 TB 之间的整数。",
+      );
+    }
+    const account = await this.storage.updateWorkspaceQuota(
+      targetUserId,
+      quotaBytes,
+    );
+    return {
+      id: account.id,
+      username: account.username,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+      administrator: account.id === admin.id,
+      workspaceQuotaBytes: normalizeWorkspaceQuotaBytes(
+        account.workspaceQuotaBytes,
+      ),
+    };
   }
 
   async deleteAccountAsAdmin(

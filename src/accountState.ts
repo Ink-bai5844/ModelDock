@@ -14,6 +14,7 @@ import {
 } from "./effects";
 import type {
   ApiConfig,
+  AgentStep,
   CatalogModel,
   ChatAttachment,
   ChatHistory,
@@ -23,13 +24,14 @@ import type {
   ModelGroup,
   ModelInputType,
   ModelOption,
+  SkillInvocationPolicy,
 } from "./types";
 
 export type ThemeMode = "dark" | "light";
 export type AccentName = "lime" | "blue" | "violet" | "orange" | "rose" | "cyan";
 
 export interface PersistedAppState {
-  version: 5;
+  version: 9;
   configs: ApiConfig[];
   customMappingTemplates: CustomMappingTemplate[];
   deletedBuiltInTemplateIds: string[];
@@ -38,6 +40,7 @@ export interface PersistedAppState {
   theme: ThemeMode;
   accent: AccentName;
   effectSettings: EffectSettings;
+  skillInvocationPolicies: Record<string, SkillInvocationPolicy>;
   conversations: ConversationRecord[];
   activeConversationId: string | null;
   selectedModelId: string;
@@ -99,7 +102,7 @@ function createInitialConversations(): ConversationRecord[] {
 
 export function createDefaultAppState(): PersistedAppState {
   return {
-    version: 5,
+    version: 9,
     configs: structuredClone(INITIAL_APIS),
     customMappingTemplates: structuredClone(INITIAL_CUSTOM_MAPPING_TEMPLATES),
     deletedBuiltInTemplateIds: [],
@@ -108,11 +111,32 @@ export function createDefaultAppState(): PersistedAppState {
     theme: "dark",
     accent: "blue",
     effectSettings: structuredClone(DEFAULT_EFFECT_SETTINGS),
+    skillInvocationPolicies: {},
     conversations: createInitialConversations(),
     activeConversationId: INITIAL_HISTORY[0]?.id ?? null,
     selectedModelId: "gpt-5.6-sol",
     selectedApiId: INITIAL_APIS[0]?.id ?? "",
   };
+}
+
+const SKILL_INVOCATION_POLICIES = new Set<SkillInvocationPolicy>([
+  "always",
+  "auto",
+  "manual",
+]);
+
+function normalizeSkillInvocationPolicies(
+  value: unknown,
+): Record<string, SkillInvocationPolicy> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([id, policy]) =>
+        /^[a-z0-9._-]{1,80}$/.test(id) &&
+        typeof policy === "string" &&
+        SKILL_INVOCATION_POLICIES.has(policy as SkillInvocationPolicy),
+    ),
+  ) as Record<string, SkillInvocationPolicy>;
 }
 
 function normalizeMappingTemplates(
@@ -186,6 +210,57 @@ function normalizeAttachment(value: unknown): ChatAttachment | undefined {
   };
 }
 
+const AGENT_TOOLS = new Set<AgentStep["tool"]>([
+  "agent",
+  "reflect",
+  "skill_context",
+  "deactivate_skill",
+  "list_files",
+  "read_file",
+  "write_file",
+  "search_files",
+  "delete_file",
+  "package_files",
+  "web_search",
+]);
+
+function normalizeAgentStep(value: unknown): AgentStep | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const step = value as Partial<AgentStep>;
+  if (
+    typeof step.id !== "string" ||
+    typeof step.tool !== "string" ||
+    !AGENT_TOOLS.has(step.tool as AgentStep["tool"]) ||
+    typeof step.label !== "string" ||
+    !["running", "completed", "failed"].includes(step.status ?? "")
+  ) {
+    return undefined;
+  }
+  return {
+    id: step.id,
+    tool: step.tool as AgentStep["tool"],
+    label: step.label,
+    detail: typeof step.detail === "string" ? step.detail : undefined,
+    status: step.status as AgentStep["status"],
+  };
+}
+
+function inferActiveSkillIds(messages: ChatMessage[]): string[] {
+  const active = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    if (message.skill?.id) active.add(message.skill.id);
+    const text = message.content.toLocaleLowerCase("zh-CN");
+    if (
+      /(?:停止|停用|关闭|取消|不再|别再|不要).{0,12}(?:使用|调用|启用)?/i.test(text) &&
+      /(?:skill|技能)/i.test(text)
+    ) {
+      active.clear();
+    }
+  }
+  return [...active].slice(0, 12);
+}
+
 function normalizeCatalogModels(
   value: unknown,
   defaults: CatalogModel[],
@@ -202,6 +277,8 @@ function normalizeCatalogModels(
       inputTypes: normalizeInputTypes(stored.inputTypes ?? fallback?.inputTypes),
       supportsReasoning:
         stored.supportsReasoning ?? fallback?.supportsReasoning ?? false,
+      supportsAgent:
+        stored.supportsAgent ?? fallback?.supportsAgent ?? false,
     };
   });
 }
@@ -232,6 +309,10 @@ function normalizeConfigs(
                 model.supportsReasoning ??
                 catalogModel?.supportsReasoning ??
                 false,
+              supportsAgent:
+                model.supportsAgent ??
+                catalogModel?.supportsAgent ??
+                false,
             };
           })
         : [],
@@ -261,10 +342,13 @@ export function normalizeAppState(value: unknown): PersistedAppState {
   return {
     ...defaults,
     ...stored,
-    version: 5,
+    version: 9,
     configs: normalizeConfigs(stored.configs, defaults.configs, catalogModels),
     customMappingTemplates,
     deletedBuiltInTemplateIds,
+    skillInvocationPolicies: normalizeSkillInvocationPolicies(
+      stored.skillInvocationPolicies,
+    ),
     modelGroups:
       Array.isArray(stored.modelGroups) && stored.modelGroups.length
         ? stored.modelGroups
@@ -293,6 +377,21 @@ export function normalizeAppState(value: unknown): PersistedAppState {
     conversations: Array.isArray(stored.conversations)
       ? stored.conversations.map((conversation) => ({
           ...conversation,
+          activeSkillIds: Array.isArray(conversation.activeSkillIds)
+            ? [...new Set(
+                conversation.activeSkillIds.filter(
+                  (id): id is string => typeof id === "string",
+                ),
+              )].slice(0, 12)
+            : inferActiveSkillIds(
+                Array.isArray(conversation.messages)
+                  ? conversation.messages
+                  : [],
+              ),
+          agentEnabled: conversation.agentEnabled === true,
+          webSearchEnabled:
+            conversation.agentEnabled === true &&
+            conversation.webSearchEnabled === true,
           messages: Array.isArray(conversation.messages)
             ? conversation.messages.map((message) => ({
                 ...message,
@@ -307,6 +406,17 @@ export function normalizeAppState(value: unknown): PersistedAppState {
                         (attachment): attachment is ChatAttachment =>
                           attachment !== undefined,
                       )
+                  : undefined,
+                skill:
+                  message.skill &&
+                  typeof message.skill.id === "string" &&
+                  typeof message.skill.name === "string"
+                    ? { id: message.skill.id, name: message.skill.name }
+                    : undefined,
+                agentSteps: Array.isArray(message.agentSteps)
+                  ? message.agentSteps
+                      .map(normalizeAgentStep)
+                      .filter((step): step is AgentStep => step !== undefined)
                   : undefined,
               }))
             : [],

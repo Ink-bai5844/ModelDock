@@ -1,6 +1,6 @@
 # ModelDock
 
-ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账号聊天工作台。它把模型目录、API 端点、聊天记录、多模态附件、图片生成/编辑、深度思考和界面外观集中在同一个 Web 应用中。
+ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账号聊天工作台。它把模型目录、API 端点、聊天记录、多模态附件、图片生成/编辑、深度思考、Agent 工具调用和界面外观集中在同一个 Web 应用中。
 
 项目采用 React + TypeScript 构建前端，Node.js + TypeScript 提供账号、存储、模型适配和流式聊天接口。开发环境由 Vite 提供页面，生产环境由 Node 进程同时提供前端静态文件与 `/api/*` 接口。
 
@@ -11,6 +11,7 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - [界面与功能](#界面与功能)
 - [支持的模型接口](#支持的模型接口)
 - [多模态文件支持](#多模态文件支持)
+- [Skill目录](#skill目录)
 - [系统架构](#系统架构)
 - [快速开始](#快速开始)
 - [配置文件](#配置文件)
@@ -54,6 +55,10 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 模型目录启用“深度思考模式”后，聊天输入框会出现“深度思考”按钮。
 - 深度思考按钮关闭时，适配器会显式请求直接回答；打开时会请求推理内容并在回答上方独立显示。
 - 对支持本地 `<think>` 标签或独立 reasoning 字段的接口，会把思考过程与最终答案分开保存和展示。
+- 在聊天框开头输入 `/` 会在输入框上方打开 Skill 选择器；选择结果会加入当前对话，并随消息记录显示调用标记。
+- 启用了 Agent 能力的模型可在聊天框中切换 Agent 模式；模型会在一轮回答内反复规划、调用 Skill 或数据工具并检查结果。
+- Agent 模式可以单独开启联网搜索。关闭时服务端拒绝搜索工具调用，打开时模型会明确收到联网权限状态。
+- 聊天框会随换行向上扩展，最多完整显示五行；清空或恢复为单行后会自动收回。
 
 ### 历史聊天记录
 
@@ -85,6 +90,7 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
   - 模型简介
   - 文本、图像、视频、音频输入类型（可多选）
   - 深度思考模式支持开关
+  - Agent 工具调用支持开关
 - 删除目录模型时，会同步从各 API 端点的可用模型列表中移除。
 - 聊天页的附件选择器会根据当前模型声明的输入类型自动限制文件格式。
 
@@ -130,12 +136,65 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 打开模型目录
 - 切换界面主题
 
+### Skill目录
+
+Skill 是由管理员统一安装的服务器级能力，不属于单个账号。普通账号不能安装、更新、删除或填写服务器文件路径，但可以在“Skill目录”中为自己的账号设置每个 Skill 的调用策略。
+
+- 管理员在 `/admin` 上传 ZIP 成品包进行安装，也可以对已有 Skill 原地更新、确认删除并设置默认调用策略。
+- ZIP 根目录或唯一的一级目录中必须包含带 `name`、`description` frontmatter 的 `SKILL.md`。
+- 压缩包最大 160 MB；服务端会拒绝路径越界、符号链接、重复路径、加密 ZIP、ZIP64 和异常膨胀包。
+- 成品安装在 `skills.directory/packages/`，管理员默认策略保存在 `skills.directory/policies.json`；两者都应作为持久化数据备份或容器卷的一部分。
+- 每个 Skill 有三种调用策略：`始终调用` 会在加入当前对话后于每轮模型回答前自动加载；`智能判断` 会把它保留为候选，由 Agent 每轮决定是否调用；`仅手动` 只在本轮通过 `/` 明确选择时加载，且不会留在后续候选中。
+- 管理员设置账号尚未自定义时使用的默认策略。普通账号在“Skill目录”中的选择保存在该账号状态里，并优先于管理员默认值。内置兼容的 `digital-me` 在没有保存过管理员配置时默认使用“始终调用”，其他 Skill 默认使用“智能判断”。
+- 用户在聊天框开头输入 `/`，按名称搜索并选择一个 Skill。本轮明确选择的 Skill 会在回答前可靠加载；Agent 仍可在同一轮使用不同关键词或时期再次调用 `skill_context`，从多个角度检索后组织最终回答。
+- 非 Agent 模式保持 `/` 选择后的单轮加载。三档持续调用策略由 Agent 模式执行。
+- 用户明确要求“停止使用 Skill”时，服务端会清空当前对话的 Skill 候选并通过 SSE 持久化到聊天记录；模型不能只用文字声称已经停用。
+- 普通 Skill 只加载 `SKILL.md` 指令。当前运行时另外兼容管理员安装的 `digital-me` 成品及其上下文准备脚本，其他 Skill 中的任意脚本不会自动执行。
+- `digital-me` 私有记忆库必须使用 `modeldock-aes-256-gcm-v1` 加密格式。Skill 包中只保存 `.enc` 密文；本地密钥单独保存在 `skills.directory/memory.key`，不会进入 Skill 成品包。服务器可改用 `MODELDOCK_SKILLS_MEMORY_KEY` 提供 32 字节 Base64 或 64 位十六进制密钥。
+- 私有记忆会在 Node 中完成认证解密，再一次性载入常驻 Python 内存数据库，不创建明文 SQLite 临时文件。激活私有记忆 Skill 后，检索上下文和最终回答会经过隐私脱敏，原始模型思考过程不会发送到浏览器。
+- Skill 目录在本地文件模式和 MySQL 模式都可启用；MySQL 只保存账号数据，Skill 成品仍由服务器文件系统统一保存。
+
+成品包应自包含运行所需文件，不能引用开发机绝对路径。若部署在 Docker/1Panel 中，请同时持久化 `skills.directory` 对应目录。
+
+### Agent 工具调用
+
+模型目录中的“Agent 工具调用”决定该模型是否在聊天框显示 Agent 按钮。开启 Agent 后，服务端会明确告诉模型当前处于 Agent 模式，并使用一个最多 8 次工具调用的循环执行本轮任务。聊天记录会保存 Agent/联网开关和简化后的步骤状态，但不会保存隐藏提示词、原始工具协议或 Skill 的私有检索结果。
+
+Agent 会被明确告知自己运行在 ModelDock 网页聊天中：用户看不到服务器文件目录，也没有 ModelDock 终端。模型不能把内部路径或终端命令当作交付方式。用户明确要求创建程序、代码、文档、配置或其他文件时，模型必须使用文件工具生成完整成品；本轮成功写入且未删除的文件会由服务端自动合并为一个 ZIP，并作为聊天附件返回。ZIP 只包含本轮交付文件，不包含账号目录中的其他历史文件，用户可以直接点击附件下载。
+
+当前工具包括：
+
+- 规划检查点：让模型在多步任务中重新判断下一步，不把内部思维链作为工具结果展示。
+- Skill 上下文：调用当前对话已经启用的 Skill，可在一轮内从多个角度重复调用。
+- 数据文件：列出、读取、写入、检索和删除当前账号的 Agent 文本文件。
+- 联网搜索：仅当聊天框的“联网搜索”按钮打开时可用；搜索词会发送给外部搜索服务。
+
+文件工具没有 Shell、进程启动或任意宿主机路径能力。所有路径都被限制在：
+
+```text
+data/agent-workspaces/<account-id>/
+```
+
+服务端会拒绝绝对路径、`..`、符号链接以及超过 256 KiB 的单个读写文件。不同账号使用独立目录，Agent 不能通过文件工具读取账号状态密文、其他账号数据或 `data/` 中的其他服务文件。单次自动交付最多包含 24 个文件、合计不超过 8 MiB；当前 Agent 每轮最多 8 次工具调用，因此通常会更早受到调用次数限制。
+
+联网搜索会并行调用 Google Custom Search JSON API 和 Bing 搜索，交错合并结果并按规范化后的直达 URL 去重，最多向 Agent 返回 10 条结果。Google 未配置或单一搜索源失败时，另一来源仍可正常返回；Google 与 Bing 都失败或都没有结果时，再尝试 DuckDuckGo HTML 搜索兜底。所有来源都只返回标题、直达链接和摘要，不提供任意网页抓取工具；单次响应上限为 2 MiB，总搜索超时为 20 秒。若所有搜索源都不可用，Agent 会收到明确的工具失败信息，不会把服务故障误报成“没有公开信息”。部署服务器需要允许 Node 容器访问外网 HTTPS。
+
+Google 搜索使用官方 Programmable Search Engine 接口，需要先创建可搜索整个网页的搜索引擎、启用 Custom Search JSON API，然后在服务器设置：
+
+```text
+MODELDOCK_GOOGLE_SEARCH_API_KEY=<Google API Key>
+MODELDOCK_GOOGLE_SEARCH_ENGINE_ID=<Programmable Search Engine ID / cx>
+```
+
+这两个值只由 Node 服务读取，不会返回到浏览器或保存进账号状态。未设置时 Google 源会被跳过，Bing 与 DuckDuckGo 仍可使用。接口参数和响应格式参考 [Google Custom Search REST 文档](https://developers.google.com/custom-search/v1/using_rest)。
+
 ### 管理员界面
 
 - 管理入口为 `/admin`，主界面中不显示跳转入口。
 - 管理员账号名由 `config.json` 的 `adminUsername` 或环境变量 `MODELDOCK_ADMIN_USERNAME` 指定。
 - 管理员必须先在普通注册页创建同名账号，然后才能在 `/admin` 使用同一账号密码登录。
 - 管理员可以搜索、查看和删除其他账号。
+- 管理员可以安装、更新和删除全局 Skill 成品；普通账号没有这些 API 权限和界面入口。
 - 管理员自身受保护，不能在管理界面删除。
 - 删除普通账号会永久删除其账号记录、API 配置、模型目录和全部聊天记录，无法撤销。
 
@@ -185,8 +244,11 @@ flowchart LR
   Proxy --> Node["ModelDock Node 服务\n静态页面 + /api/*"]
   Node --> Auth["账号与会话"]
   Node --> Gateway["Provider Gateway"]
+  Node --> Agent["Agent Runtime\nSkill + 数据工具 + 可选搜索"]
   Auth --> Files["本地 data/\n账号索引 + 加密工作区"]
   Auth --> MySQL["MySQL\n账号表 + 加密状态表"]
+  Agent --> Gateway
+  Agent --> AgentData["data/agent-workspaces\n账号独立文件"]
   Gateway --> OpenAI["OpenAI Compatible"]
   Gateway --> Anthropic["Anthropic"]
   Gateway --> Gemini["Gemini"]
@@ -298,6 +360,12 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
       "http://127.0.0.1:4173",
       "http://localhost:4173"
     ]
+  },
+  "skills": {
+    "enabled": false,
+    "directory": "./data/skills",
+    "pythonExecutable": "python",
+    "allowScriptExecution": false
   }
 }
 ```
@@ -330,6 +398,31 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
 | `server.secureCookies` | boolean | `false` | HTTPS 生产环境应设为 `true`，使登录 Cookie 带 `Secure` 属性 |
 | `server.allowedOrigins` | string[] | 本地 Vite 地址 | 允许跨来源调用 API 的完整 Origin，例如 `https://example.com`，不带末尾路径 |
 
+### `skills` 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `skills.enabled` | boolean | `false` | 开启全局 Skill目录和管理员 Skill 管理 API |
+| `skills.directory` | string | `./data/skills` | 管理员安装的 Skill 成品存储目录；相对路径以项目运行目录为基准 |
+| `skills.pythonExecutable` | string | `python` | 受支持的 Skill 上下文脚本使用的 Python 命令或绝对路径 |
+| `skills.allowScriptExecution` | boolean | `false` | 允许内置兼容运行时执行受支持的上下文脚本 |
+
+配置示例：
+
+```json
+{
+  "onlineMode": false,
+  "skills": {
+    "enabled": true,
+    "directory": "./data/skills",
+    "pythonExecutable": "python",
+    "allowScriptExecution": true
+  }
+}
+```
+
+不要把生成器、原始聊天归档或包含 API Key 的构建配置打进成品 ZIP。成品依赖的数据文件必须放在包内并使用相对路径引用。
+
 配置优先级为：受支持的环境变量 > `config.json` > 程序默认值。
 
 ## 环境变量
@@ -347,6 +440,13 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
 | `MODELDOCK_SERVER_HOST` | `server.host` | `0.0.0.0` |
 | `MODELDOCK_SERVER_PORT` | `server.port` | `3000` |
 | `MODELDOCK_SECURE_COOKIES` | `server.secureCookies` | `true` |
+| `MODELDOCK_SKILLS_ENABLED` | `skills.enabled` | `true` |
+| `MODELDOCK_SKILLS_DIRECTORY` | `skills.directory` | `/app/data/skills` |
+| `MODELDOCK_SKILLS_PYTHON` | `skills.pythonExecutable` | `python` |
+| `MODELDOCK_SKILLS_ALLOW_SCRIPT_EXECUTION` | `skills.allowScriptExecution` | `true` |
+| `MODELDOCK_SKILLS_MEMORY_KEY` | 私有 Skill 记忆库解密密钥（32 字节 Base64 或 64 位十六进制） | 使用独立强随机密钥 |
+| `MODELDOCK_GOOGLE_SEARCH_API_KEY` | Google Custom Search API Key | 使用 Google Cloud 中受限的 API Key |
+| `MODELDOCK_GOOGLE_SEARCH_ENGINE_ID` | Google Programmable Search Engine ID（`cx`） | `012345678901234567890:example` |
 
 如果修改了 `mysql.passwordEnvironmentVariable`，实际环境变量名也要随之修改。例如设置为 `DB_PASSWORD` 后，程序会读取 `DB_PASSWORD`，而不是 `MODELDOCK_MYSQL_PASSWORD`。
 
@@ -582,6 +682,8 @@ MODELDOCK_SERVER_HOST=127.0.0.1
 MODELDOCK_SERVER_PORT=3000
 MODELDOCK_SECURE_COOKIES=true
 MODELDOCK_ADMIN_USERNAME=admin
+MODELDOCK_GOOGLE_SEARCH_API_KEY=<Google API Key，可选>
+MODELDOCK_GOOGLE_SEARCH_ENGINE_ID=<Google 搜索引擎 ID，可选>
 ```
 
 限制文件权限：
@@ -844,9 +946,15 @@ sudo systemctl restart modeldock
 | DELETE | `/api/admin/accounts/:id` | 管理员删除普通账号 |
 | GET | `/api/state` | 读取当前账号工作区 |
 | PUT | `/api/state` | 保存当前账号工作区 |
+| GET | `/api/skills/catalog` | 登录账号读取可用 Skill目录（不返回服务器路径） |
+| GET | `/api/admin/skills` | 管理员读取全局 Skill目录 |
+| POST | `/api/admin/skills` | 管理员上传 ZIP 并安装 Skill |
+| PUT | `/api/admin/skills/:id` | 管理员上传 ZIP 并更新指定 Skill |
+| PATCH | `/api/admin/skills/:id/policy` | 管理员修改 Skill 的默认调用策略 |
+| DELETE | `/api/admin/skills/:id` | 管理员删除指定 Skill |
 | POST | `/api/providers/test` | 测试指定 API 配置 |
 | GET | `/api/providers/models?configId=...` | 获取指定端点模型列表 |
-| POST | `/api/chat` | 发起聊天并返回 SSE 文本、思考和附件流 |
+| POST | `/api/chat` | 发起聊天并返回 SSE 文本、思考、附件和 Agent 步骤流 |
 
 除健康检查、运行配置和登录/注册外，账号相关接口都需要有效的 HttpOnly 会话 Cookie。
 
@@ -955,6 +1063,7 @@ ModelDock/
 │   ├── auth/                   # 账号、密码、管理员和会话
 │   ├── core/                   # 加密、Base64 与错误类型
 │   ├── providers/              # 各厂商适配器与自定义映射
+│   ├── skills/                 # Skill ZIP 校验、全局目录与请求时加载
 │   ├── storage/                # 本地文件与 MySQL 存储
 │   ├── config.ts               # 配置加载和环境变量覆盖
 │   └── index.ts                # HTTP、静态文件、API 与 SSE 入口
@@ -963,6 +1072,7 @@ ModelDock/
 │   ├── AdminApp.tsx            # 管理员界面
 │   ├── AuthScreen.tsx          # 登录/注册界面
 │   ├── ModelCatalogWorkspace.tsx
+│   ├── SkillWorkspace.tsx      # 普通账号 Skill目录与账号级调用策略
 │   ├── AppearanceDrawer.tsx
 │   ├── MarkdownContent.tsx
 │   ├── ReasoningPanel.tsx

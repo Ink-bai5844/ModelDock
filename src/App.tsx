@@ -22,6 +22,7 @@ import {
   FloppyDisk,
   GearSix,
   Globe,
+  HardDrive,
   LockKey,
   MagnifyingGlass,
   Moon,
@@ -29,6 +30,8 @@ import {
   Palette,
   PencilSimple,
   Plus,
+  PuzzlePiece,
+  Robot,
   SidebarSimple,
   SignOut,
   SlidersHorizontal,
@@ -48,6 +51,7 @@ import {
   Suspense,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -66,6 +70,7 @@ import {
   ClientApiError,
   getRuntimeConfig,
   getSession,
+  listLocalSkills,
   loadUserState,
   login,
   logout,
@@ -80,6 +85,8 @@ import type { EffectSettings } from "./effects";
 import { ParticleField } from "./ParticleField";
 import { ModelCatalogWorkspace } from "./ModelCatalogWorkspace";
 import { ReasoningPanel } from "./ReasoningPanel";
+import { SkillWorkspace } from "./SkillWorkspace";
+import { WorkspaceFiles } from "./WorkspaceFiles";
 import { DEFAULT_CUSTOM_MAPPING } from "./mappingTemplates";
 import {
   acceptForInputTypes,
@@ -93,6 +100,7 @@ import {
 import { moveItemById, useSortableList } from "./sortable";
 import type {
   ApiConfig,
+  AgentStep,
   AuthUser,
   CatalogModel,
   ChatAttachment,
@@ -104,7 +112,9 @@ import type {
   ModelGroup,
   ModelInputType,
   ModelOption,
+  LocalSkillDescriptor,
   ProviderFormat,
+  SkillInvocationPolicy,
 } from "./types";
 
 const PAGE_SIZE = 6;
@@ -115,7 +125,7 @@ const MarkdownContent = lazy(() =>
   })),
 );
 
-type AppView = "chat" | "settings" | "catalog";
+type AppView = "chat" | "workspace" | "settings" | "catalog" | "skills";
 
 const ACCENT_RGB: Record<ThemeMode, Record<AccentName, string>> = {
   dark: {
@@ -184,6 +194,7 @@ function UserAvatar({ username, className }: UserAvatarProps) {
 interface WorkspaceAppProps {
   user: AuthUser;
   initialState: PersistedAppState;
+  skillsEnabled: boolean;
   onLoggedOut: () => void;
 }
 
@@ -193,7 +204,34 @@ function activateAccountTheme(accountId: string, theme: ThemeMode) {
   rememberAccountTheme(window.localStorage, accountId, theme);
 }
 
-function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
+function conversationActiveSkillIds(
+  conversation: ConversationRecord | undefined,
+): string[] {
+  if (!conversation) return [];
+  if (Array.isArray(conversation.activeSkillIds)) {
+    return [...new Set(conversation.activeSkillIds)].slice(0, 12);
+  }
+  const active = new Set<string>();
+  for (const message of conversation.messages) {
+    if (message.role !== "user") continue;
+    if (message.skill?.id) active.add(message.skill.id);
+    const text = message.content.toLocaleLowerCase("zh-CN");
+    if (
+      /(?:停止|停用|关闭|取消|不再|别再|不要).{0,12}(?:使用|调用|启用)?/i.test(text) &&
+      /(?:skill|技能)/i.test(text)
+    ) {
+      active.clear();
+    }
+  }
+  return [...active].slice(0, 12);
+}
+
+function WorkspaceApp({
+  user,
+  initialState,
+  skillsEnabled,
+  onLoggedOut,
+}: WorkspaceAppProps) {
   const [view, setView] = useState<AppView>("chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [configs, setConfigs] = useState<ApiConfig[]>(initialState.configs);
@@ -205,6 +243,12 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
   );
   const [modelGroups, setModelGroups] = useState<ModelGroup[]>(initialState.modelGroups);
   const [catalogModels, setCatalogModels] = useState<CatalogModel[]>(initialState.catalogModels);
+  const [skills, setSkills] = useState<LocalSkillDescriptor[]>([]);
+  const [skillsLoading, setSkillsLoading] = useState(skillsEnabled);
+  const [skillInvocationPolicies, setSkillInvocationPolicies] = useState<
+    Record<string, SkillInvocationPolicy>
+  >(initialState.skillInvocationPolicies);
+  const [selectedDraftSkill, setSelectedDraftSkill] = useState<LocalSkillDescriptor | null>(null);
   const [selectedApiId, setSelectedApiId] = useState(initialState.selectedApiId);
   const [editingApiId, setEditingApiId] = useState(initialState.selectedApiId);
   const [selectedModelId, setSelectedModelId] = useState(initialState.selectedModelId);
@@ -241,11 +285,22 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
   );
   const [isStreaming, setIsStreaming] = useState(false);
   const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [agentEnabled, setAgentEnabled] = useState(
+    initialConversation?.agentEnabled === true,
+  );
+  const [webSearchEnabled, setWebSearchEnabled] = useState(
+    initialConversation?.agentEnabled === true &&
+      initialConversation?.webSearchEnabled === true,
+  );
+  const [activeSkillIds, setActiveSkillIds] = useState<string[]>(
+    conversationActiveSkillIds(initialConversation),
+  );
   const [toast, setToast] = useState("");
   const abortController = useRef<AbortController | null>(null);
   const promptEditDraftBackup = useRef<{
     content: string;
     attachments: ChatAttachment[];
+    skill: LocalSkillDescriptor | null;
   } | null>(null);
   const messagesRef = useRef(messages);
 
@@ -267,6 +322,9 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     ) ?? availableModels[0];
   const reasoningAvailable = selectedModel?.supportsReasoning === true;
   const reasoningActive = reasoningAvailable && reasoningEnabled;
+  const agentAvailable = selectedModel?.supportsAgent === true;
+  const agentActive = agentAvailable && agentEnabled;
+  const webSearchActive = agentActive && webSearchEnabled;
 
   useEffect(() => {
     setReasoningEnabled(false);
@@ -275,6 +333,12 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     selectedModel?.id,
     selectedModel?.supportsReasoning,
   ]);
+
+  useEffect(() => {
+    if (agentAvailable) return;
+    setAgentEnabled(false);
+    setWebSearchEnabled(false);
+  }, [agentAvailable]);
 
   useEffect(() => {
     if (
@@ -309,9 +373,31 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     messagesRef.current = messages;
   }, [messages]);
 
+  useEffect(() => {
+    if (!skillsEnabled) return;
+    let cancelled = false;
+    setSkillsLoading(true);
+    void listLocalSkills()
+      .then((catalog) => {
+        if (cancelled) return;
+        setSkills(catalog);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setToast(error instanceof Error ? error.message : "Skill目录读取失败");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSkillsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [skillsEnabled]);
+
   const persistedState = useMemo<PersistedAppState>(
     () => ({
-      version: 5,
+      version: 9,
       configs,
       customMappingTemplates: mappingTemplates,
       deletedBuiltInTemplateIds,
@@ -320,6 +406,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       theme,
       accent,
       effectSettings,
+      skillInvocationPolicies,
       conversations,
       activeConversationId,
       selectedModelId,
@@ -337,9 +424,26 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       modelGroups,
       selectedApiId,
       selectedModelId,
+      skillInvocationPolicies,
       theme,
     ],
   );
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    setConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === activeConversationId
+          ? {
+              ...conversation,
+              activeSkillIds,
+              agentEnabled: agentActive,
+              webSearchEnabled: webSearchActive,
+            }
+          : conversation,
+      ),
+    );
+  }, [activeConversationId, activeSkillIds, agentActive, webSearchActive]);
 
   const saveFailureNotified = useRef(false);
   useEffect(() => {
@@ -410,9 +514,11 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     if (restoreDraft && backup) {
       setDraft(backup.content);
       setDraftAttachments(backup.attachments);
+      setSelectedDraftSkill(backup.skill);
     } else {
       setDraft("");
       setDraftAttachments([]);
+      setSelectedDraftSkill(null);
     }
     promptEditDraftBackup.current = null;
     setEditingPromptMessageId(null);
@@ -422,6 +528,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     conversationId: string,
     title: string,
     nextMessages: ChatMessage[],
+    nextActiveSkillIds: string[] = activeSkillIds,
   ) => {
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
@@ -449,6 +556,9 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
         providerName:
           selectedModel?.providerName ?? existing?.providerName ?? "未选择 API",
         messages: nextMessages,
+        activeSkillIds: [...new Set(nextActiveSkillIds)].slice(0, 12),
+        agentEnabled: agentActive,
+        webSearchEnabled: webSearchActive,
       };
       return [next, ...current.filter((conversation) => conversation.id !== conversationId)];
     });
@@ -458,17 +568,34 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     conversationId: string,
     title: string,
     requestMessages: ChatMessage[],
+    skillId?: string,
+    requestedActiveSkillIds: string[] = activeSkillIds,
   ) => {
     if (!selectedModel) {
       setToast("请先启用一个 API 配置并选择模型");
       return;
     }
     const useReasoning = reasoningAvailable ? reasoningActive : undefined;
+    const useAgent = agentActive;
+    const useWebSearch = useAgent && webSearchActive;
+    let currentActiveSkillIds = [...new Set(requestedActiveSkillIds)].slice(0, 12);
+    const requestSkillPolicies = Object.fromEntries(
+      [...new Set([
+        ...currentActiveSkillIds,
+        ...(skillId ? [skillId] : []),
+      ])].map((id) => [
+        id,
+        skillInvocationPolicies[id] ??
+          skills.find((skill) => skill.id === id)?.defaultInvocationPolicy ??
+          "auto",
+      ]),
+    ) as Record<string, SkillInvocationPolicy>;
     const responseId = `assistant-${Date.now()}`;
     const started = performance.now();
     let assistantContent = "";
     let assistantReasoning = "";
     let assistantAttachments: ChatAttachment[] = [];
+    let assistantAgentSteps: AgentStep[] = [];
     const withPlaceholder = [
       ...requestMessages,
       {
@@ -476,10 +603,11 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
         role: "assistant",
         content: "",
         author: selectedModel.name,
-        meta: `${selectedModel.name} · 生成中`,
+          meta: `${selectedModel.name} · 生成中`,
+          agentSteps: useAgent ? [] : undefined,
       },
     ] satisfies ChatMessage[];
-    commitConversation(conversationId, title, withPlaceholder);
+    commitConversation(conversationId, title, withPlaceholder, currentActiveSkillIds);
     setIsStreaming(true);
     const controller = new AbortController();
     abortController.current = controller;
@@ -490,6 +618,11 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
           model: selectedModel.id,
           messages: requestMessages,
           reasoning: useReasoning,
+          skillId,
+          skillIds: currentActiveSkillIds,
+          skillPolicies: requestSkillPolicies,
+          agent: useAgent,
+          webSearch: useWebSearch,
         },
         controller.signal,
         (chunk) => {
@@ -497,6 +630,18 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             assistantContent += chunk.text;
           } else if (chunk.type === "reasoning-delta") {
             assistantReasoning += chunk.text;
+          } else if (chunk.type === "agent-step") {
+            const existingIndex = assistantAgentSteps.findIndex(
+              (step) => step.id === chunk.step.id,
+            );
+            assistantAgentSteps = existingIndex >= 0
+              ? assistantAgentSteps.map((step, index) =>
+                  index === existingIndex ? chunk.step : step,
+                )
+              : [...assistantAgentSteps, chunk.step];
+          } else if (chunk.type === "agent-skills") {
+            currentActiveSkillIds = [...new Set(chunk.activeSkillIds)].slice(0, 12);
+            setActiveSkillIds(currentActiveSkillIds);
           } else if (
             !assistantAttachments.some(
               (attachment) => attachment.id === chunk.attachment.id,
@@ -514,14 +659,22 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
                     content: assistantContent,
                     reasoning: assistantReasoning || undefined,
                     attachments: assistantAttachments,
+                    agentSteps: assistantAgentSteps.length
+                      ? assistantAgentSteps
+                      : undefined,
                     meta: `${selectedModel.name} · ${
-                      assistantReasoning && !assistantContent
+                      useAgent && assistantAgentSteps.some(
+                        (step) => step.status === "running",
+                      )
+                        ? "Agent 执行中"
+                        : assistantReasoning && !assistantContent
                         ? "思考中"
                         : "生成中"
                     }`,
                   }
                 : message,
             ),
+            currentActiveSkillIds,
           );
         },
       );
@@ -542,13 +695,30 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
                       : "模型没有返回文本内容。"),
                 reasoning: assistantReasoning || undefined,
                 attachments: assistantAttachments,
-                meta: `${selectedModel.name} · ${elapsed}s`,
+                agentSteps: assistantAgentSteps.length
+                  ? assistantAgentSteps
+                  : undefined,
+                meta: `${selectedModel.name} · ${elapsed}s${
+                  useAgent
+                    ? ` · Agent ${assistantAgentSteps.filter((step) => step.tool !== "agent").length} 步`
+                    : ""
+                }`,
               }
             : message,
         ),
+        currentActiveSkillIds,
       );
     } catch (error) {
       const cancelled = controller.signal.aborted;
+      assistantAgentSteps = assistantAgentSteps.map((step) =>
+        step.status === "running"
+          ? {
+              ...step,
+              detail: cancelled ? "已停止" : step.detail,
+              status: "failed" as const,
+            }
+          : step,
+      );
       const message = cancelled
         ? assistantContent || "生成已停止。"
         : error instanceof Error
@@ -564,10 +734,14 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
                 content: message,
                 reasoning: assistantReasoning || undefined,
                 attachments: assistantAttachments,
+                agentSteps: assistantAgentSteps.length
+                  ? assistantAgentSteps
+                  : undefined,
                 meta: cancelled ? `${selectedModel.name} · 已停止` : `${selectedModel.name} · 错误`,
               }
             : item,
         ),
+        currentActiveSkillIds,
       );
     } finally {
       if (abortController.current === controller) abortController.current = null;
@@ -597,7 +771,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       ? `${MODEL_INPUT_TYPE_LABELS[draftAttachments[0].kind]}附件`
       : "新对话";
     const title =
-      activeConversationId && currentTitle !== "未命名对话"
+      currentTitle !== "未命名对话"
         ? currentTitle
         : text.slice(0, 34) || attachmentTitle;
     const editingIndex = editingPromptMessageId
@@ -616,6 +790,9 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       role: "user",
       content: text,
       attachments: draftAttachments,
+      skill: selectedDraftSkill
+        ? { id: selectedDraftSkill.id, name: selectedDraftSkill.displayName }
+        : undefined,
       meta: new Date().toLocaleTimeString("zh-CN", {
         hour: "2-digit",
         minute: "2-digit",
@@ -629,10 +806,69 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     setCurrentTitle(title);
     setDraft("");
     setDraftAttachments([]);
+    const requestSkillId = selectedDraftSkill?.id;
+    const requestSkillPolicy = requestSkillId
+      ? skillInvocationPolicies[requestSkillId] ??
+        selectedDraftSkill?.defaultInvocationPolicy ??
+        "auto"
+      : undefined;
+    const nextActiveSkillIds = requestSkillId && requestSkillPolicy !== "manual"
+      ? [...new Set([...activeSkillIds, requestSkillId])].slice(0, 12)
+      : activeSkillIds;
+    setActiveSkillIds(nextActiveSkillIds);
+    setSelectedDraftSkill(null);
     setEditingPromptMessageId(null);
     promptEditDraftBackup.current = null;
-    commitConversation(conversationId, title, requestMessages);
-    void startStreaming(conversationId, title, requestMessages);
+    commitConversation(conversationId, title, requestMessages, nextActiveSkillIds);
+    void startStreaming(
+      conversationId,
+      title,
+      requestMessages,
+      requestSkillId,
+      nextActiveSkillIds,
+    );
+  };
+
+  const changeSkillInvocationPolicy = (
+    skillId: string,
+    policy: SkillInvocationPolicy,
+  ) => {
+    setSkillInvocationPolicies((current) => ({ ...current, [skillId]: policy }));
+    if (policy === "manual") {
+      setActiveSkillIds((current) => current.filter((id) => id !== skillId));
+      setConversations((current) =>
+        current.map((conversation) => ({
+          ...conversation,
+          activeSkillIds: conversation.activeSkillIds?.filter((id) => id !== skillId),
+        })),
+      );
+    }
+    const label = policy === "always"
+      ? "始终调用"
+      : policy === "auto"
+        ? "智能判断"
+        : "仅手动";
+    setToast(`Skill 调用策略已改为${label}`);
+  };
+
+  const renameCurrentConversation = (nextTitle: string) => {
+    const normalizedTitle = nextTitle.trim().replace(/\s+/g, " ").slice(0, 80);
+    if (!normalizedTitle || normalizedTitle === currentTitle) return;
+    setCurrentTitle(normalizedTitle);
+    if (activeConversationId) {
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === activeConversationId
+            ? {
+                ...conversation,
+                title: normalizedTitle,
+                updatedAt: new Date().toISOString(),
+              }
+            : conversation,
+        ),
+      );
+    }
+    setToast("对话标题已更新");
   };
 
   const openHistory = (item: ChatHistory) => {
@@ -649,10 +885,17 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       );
     if (matchingConfig) setSelectedApiId(matchingConfig.id);
     setSelectedModelId(item.modelId);
+    setAgentEnabled(conversation.agentEnabled === true);
+    setWebSearchEnabled(
+      conversation.agentEnabled === true &&
+        conversation.webSearchEnabled === true,
+    );
+    setActiveSkillIds(conversationActiveSkillIds(conversation));
     setActiveConversationId(item.id);
     messagesRef.current = conversation.messages;
     setMessages(conversation.messages);
     resetPromptEdit(false);
+    setSelectedDraftSkill(null);
     setDraftAttachments([]);
     setView("chat");
     setSidebarOpen(false);
@@ -667,6 +910,8 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     setMessages([]);
     setDraft("");
     setDraftAttachments([]);
+    setSelectedDraftSkill(null);
+    setActiveSkillIds([]);
     setView("chat");
     setSidebarOpen(false);
   };
@@ -688,6 +933,10 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       setMessages([]);
       setDraft("");
       setDraftAttachments([]);
+      setSelectedDraftSkill(null);
+      setActiveSkillIds([]);
+      setAgentEnabled(false);
+      setWebSearchEnabled(false);
       setView("chat");
     }
     setToast(`已删除 ${conversationIds.length} 条聊天记录`);
@@ -726,6 +975,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
               capability: updated.capability,
               inputTypes: updated.inputTypes,
               supportsReasoning: updated.supportsReasoning ?? false,
+              supportsAgent: updated.supportsAgent ?? false,
             },
           ];
         }),
@@ -768,11 +1018,15 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
       promptEditDraftBackup.current = {
         content: draft,
         attachments: draftAttachments,
+        skill: selectedDraftSkill,
       };
     }
     setEditingPromptMessageId(prompt.id);
     setDraft(prompt.content);
     setDraftAttachments(prompt.attachments ?? []);
+    setSelectedDraftSkill(
+      prompt.skill ? skills.find((skill) => skill.id === prompt.skill?.id) ?? null : null,
+    );
     setToast(
       prompt.attachments?.length
         ? `已恢复提示词和 ${prompt.attachments.length} 个附件`
@@ -793,7 +1047,14 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
     if (assistantIndex < 1) return;
     const requestMessages = messagesRef.current.slice(0, assistantIndex);
     if (requestMessages[requestMessages.length - 1]?.role !== "user") return;
-    void startStreaming(activeConversationId, currentTitle, requestMessages);
+    const promptSkillId = requestMessages[requestMessages.length - 1]?.skill?.id;
+    void startStreaming(
+      activeConversationId,
+      currentTitle,
+      requestMessages,
+      promptSkillId,
+      activeSkillIds,
+    );
   };
 
   const handleLogout = async () => {
@@ -879,6 +1140,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
         onOpenHistory={openHistory}
         allHistoryIds={filteredHistory.map((item) => item.id)}
         onDeleteHistory={deleteHistory}
+        skillsEnabled={skillsEnabled}
         username={user.username}
         onChangePassword={handleChangePassword}
         onLogout={() => void handleLogout()}
@@ -896,9 +1158,13 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
           title={
             view === "chat"
               ? currentTitle
-              : view === "settings"
-                ? "API 连接"
-                : "模型目录"
+              : view === "workspace"
+                ? "工作区"
+                : view === "settings"
+                  ? "API 连接"
+                  : view === "catalog"
+                    ? "模型目录"
+                    : "Skill目录"
           }
           view={view}
           selectedModel={selectedModel}
@@ -931,6 +1197,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             setAppearanceOpen(true);
           }}
           onOpenCommands={() => setCommandOpen(true)}
+          onRenameTitle={renameCurrentConversation}
         />
 
         {view === "chat" ? (
@@ -944,6 +1211,11 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             inputTypes={selectedModel?.inputTypes ?? ["text"]}
             reasoningAvailable={reasoningAvailable}
             reasoningEnabled={reasoningActive}
+            agentAvailable={agentAvailable}
+            agentEnabled={agentActive}
+            webSearchEnabled={webSearchActive}
+            availableSkills={skills}
+            selectedSkill={selectedDraftSkill}
             isStreaming={isStreaming}
             editingPromptMessageId={editingPromptMessageId}
             onDraft={setDraft}
@@ -959,6 +1231,16 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             onToggleReasoning={() =>
               setReasoningEnabled((enabled) => !enabled)
             }
+            onToggleAgent={() => {
+              setAgentEnabled((enabled) => {
+                if (enabled) setWebSearchEnabled(false);
+                return !enabled;
+              });
+            }}
+            onToggleWebSearch={() =>
+              setWebSearchEnabled((enabled) => !enabled)
+            }
+            onSelectSkill={setSelectedDraftSkill}
             onStop={stopStreaming}
             onCopy={(message) => void copyMessage(message)}
             onRegenerate={regenerateLastAnswer}
@@ -966,6 +1248,8 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             onCancelPromptEdit={() => resetPromptEdit(true)}
             onToast={setToast}
           />
+        ) : view === "workspace" ? (
+          <WorkspaceFiles onToast={setToast} />
         ) : view === "settings" ? (
           <SettingsWorkspace
             configs={configs}
@@ -988,13 +1272,20 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
             onToast={setToast}
             onOpenCatalog={() => navigate("catalog")}
           />
-        ) : (
+        ) : view === "catalog" ? (
           <ModelCatalogWorkspace
             models={catalogModels}
             groups={modelGroups}
             onChange={applyCatalogChange}
             onToast={setToast}
             onOpenApis={() => navigate("settings")}
+          />
+        ) : (
+          <SkillWorkspace
+            skills={skills}
+            loading={skillsLoading}
+            policies={skillInvocationPolicies}
+            onPolicyChange={changeSkillInvocationPolicy}
           />
         )}
       </main>
@@ -1017,6 +1308,7 @@ function WorkspaceApp({ user, initialState, onLoggedOut }: WorkspaceAppProps) {
           onNewChat={newChat}
           onSearch={focusHistorySearch}
           onNavigate={navigate}
+          skillsEnabled={skillsEnabled}
           onAppearance={() => {
             setCommandOpen(false);
             setAppearanceOpen(true);
@@ -1042,6 +1334,7 @@ interface SidebarProps {
   onOpenHistory: (item: ChatHistory) => void;
   allHistoryIds: string[];
   onDeleteHistory: (conversationIds: string[]) => void;
+  skillsEnabled: boolean;
   username: string;
   onChangePassword: (
     currentPassword: string,
@@ -1065,6 +1358,7 @@ function Sidebar({
   onOpenHistory,
   allHistoryIds,
   onDeleteHistory,
+  skillsEnabled,
   username,
   onChangePassword,
   onLogout,
@@ -1135,6 +1429,13 @@ function Sidebar({
           对话
         </button>
         <button
+          className={view === "workspace" ? "active" : ""}
+          onClick={() => onNavigate("workspace")}
+        >
+          <HardDrive size={19} />
+          工作区
+        </button>
+        <button
           className={view === "settings" ? "active" : ""}
           onClick={() => onNavigate("settings")}
         >
@@ -1148,6 +1449,15 @@ function Sidebar({
           <SquaresFour size={19} />
           模型目录
         </button>
+        {skillsEnabled && (
+          <button
+            className={view === "skills" ? "active" : ""}
+            onClick={() => onNavigate("skills")}
+          >
+            <PuzzlePiece size={19} />
+            Skill目录
+          </button>
+        )}
       </nav>
 
       <div className="history-heading">
@@ -1612,6 +1922,7 @@ interface TopbarProps {
   onAccent: (accent: AccentName) => void;
   onOpenAppearance: () => void;
   onOpenCommands: () => void;
+  onRenameTitle: (title: string) => void;
 }
 
 function Topbar({
@@ -1634,22 +1945,105 @@ function Topbar({
   onAccent,
   onOpenAppearance,
   onOpenCommands,
+  onRenameTitle,
 }: TopbarProps) {
+  const [titleEditorOpen, setTitleEditorOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(title);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setTitleDraft(title);
+    setTitleEditorOpen(false);
+  }, [title, view]);
+
+  useEffect(() => {
+    if (!titleEditorOpen) return;
+    titleInputRef.current?.focus();
+    titleInputRef.current?.select();
+  }, [titleEditorOpen]);
+
+  const submitTitle = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalizedTitle = titleDraft.trim().replace(/\s+/g, " ").slice(0, 80);
+    if (!normalizedTitle) return;
+    onRenameTitle(normalizedTitle);
+    setTitleDraft(normalizedTitle);
+    setTitleEditorOpen(false);
+  };
+
+  const cancelTitleEdit = () => {
+    setTitleDraft(title);
+    setTitleEditorOpen(false);
+  };
+
   return (
     <header className="topbar">
       <div className="topbar-title">
         <button className="icon-button mobile-menu" onClick={onToggleSidebar} aria-label="打开侧栏">
           <SidebarSimple size={21} />
         </button>
-        <div>
+        <div className="topbar-title-copy">
           <span className="eyebrow">
             {view === "chat"
               ? "WORKSPACE / CHAT"
-              : view === "settings"
-                ? "WORKSPACE / CONNECTIONS"
-                : "WORKSPACE / CATALOG"}
+              : view === "workspace"
+                ? "WORKSPACE / FILES"
+                : view === "settings"
+                  ? "WORKSPACE / CONNECTIONS"
+                  : view === "catalog"
+                    ? "WORKSPACE / CATALOG"
+                    : "WORKSPACE / SKILLS"}
           </span>
-          <h1>{title}</h1>
+          <div className="topbar-title-line">
+            {view === "chat" && titleEditorOpen ? (
+              <form className="topbar-title-editor" onSubmit={submitTitle}>
+                <input
+                  ref={titleInputRef}
+                  value={titleDraft}
+                  maxLength={80}
+                  aria-label="对话标题"
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      cancelTitleEdit();
+                    }
+                  }}
+                />
+                <button
+                  type="submit"
+                  aria-label="保存对话标题"
+                  title="保存标题"
+                  disabled={!titleDraft.trim()}
+                >
+                  <Check size={14} weight="bold" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="取消重命名"
+                  title="取消"
+                  onClick={cancelTitleEdit}
+                >
+                  <X size={14} />
+                </button>
+              </form>
+            ) : (
+              <>
+                <h1 title={title}>{title}</h1>
+                {view === "chat" && (
+                  <button
+                    className="topbar-rename-button"
+                    type="button"
+                    aria-label="重命名对话标题"
+                    title="重命名对话"
+                    onClick={() => setTitleEditorOpen(true)}
+                  >
+                    <PencilSimple size={13} />
+                  </button>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1894,12 +2288,14 @@ function CommandPalette({
   onNewChat,
   onSearch,
   onNavigate,
+  skillsEnabled,
   onAppearance,
 }: {
   onClose: () => void;
   onNewChat: () => void;
   onSearch: () => void;
   onNavigate: (view: AppView) => void;
+  skillsEnabled: boolean;
   onAppearance: () => void;
 }) {
   const actions = [
@@ -1918,6 +2314,13 @@ function CommandPalette({
       run: onSearch,
     },
     {
+      label: "打开工作区",
+      detail: "查看、预览和下载 Agent 生成的文件",
+      shortcut: "",
+      icon: <HardDrive size={18} />,
+      run: () => onNavigate("workspace"),
+    },
+    {
       label: "管理 API 连接",
       detail: "编辑端点、密钥与可用模型",
       shortcut: "",
@@ -1931,6 +2334,15 @@ function CommandPalette({
       icon: <SquaresFour size={18} />,
       run: () => onNavigate("catalog"),
     },
+    ...(skillsEnabled
+      ? [{
+          label: "打开 Skill目录",
+          detail: "查看管理员提供的可用 Skill",
+          shortcut: "",
+          icon: <PuzzlePiece size={18} />,
+          run: () => onNavigate("skills"),
+        }]
+      : []),
     {
       label: "高级外观设置",
       detail: "调整粒子、网格与背景动效",
@@ -2262,6 +2674,58 @@ function DraftAttachmentStrip({
   );
 }
 
+function AgentActivity({
+  steps,
+  isStreaming,
+}: {
+  steps: AgentStep[];
+  isStreaming: boolean;
+}) {
+  const toolSteps = steps.filter((step) => step.tool !== "agent");
+  const running = steps.some((step) => step.status === "running");
+  const failed = steps.some((step) => step.status === "failed");
+  const summary = running
+    ? "正在执行"
+    : failed
+      ? "部分步骤未完成"
+      : toolSteps.length
+        ? `完成 ${toolSteps.length} 次工具调用`
+        : "无需额外工具";
+  return (
+    <details className="agent-activity" open={isStreaming || undefined}>
+      <summary>
+        <span className="agent-activity-mark">
+          <Robot size={16} weight={running ? "fill" : "regular"} />
+        </span>
+        <span>
+          <strong>Agent</strong>
+          <small>{summary}</small>
+        </span>
+        <CaretDown className="agent-activity-caret" size={14} />
+      </summary>
+      <div className="agent-step-list" aria-live="polite">
+        {steps.map((step) => (
+          <div className={`agent-step agent-step-${step.status}`} key={step.id}>
+            <span className="agent-step-state" aria-hidden="true">
+              {step.status === "running" ? (
+                <CircleNotch className="spin" size={13} />
+              ) : step.status === "completed" ? (
+                <CheckCircle size={13} weight="fill" />
+              ) : (
+                <X size={13} weight="bold" />
+              )}
+            </span>
+            <span>
+              <strong>{step.label}</strong>
+              {step.detail && <small>{step.detail}</small>}
+            </span>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 interface ChatWorkspaceProps {
   messages: ChatMessage[];
   draft: string;
@@ -2272,6 +2736,11 @@ interface ChatWorkspaceProps {
   inputTypes: ModelInputType[];
   reasoningAvailable: boolean;
   reasoningEnabled: boolean;
+  agentAvailable: boolean;
+  agentEnabled: boolean;
+  webSearchEnabled: boolean;
+  availableSkills: LocalSkillDescriptor[];
+  selectedSkill: LocalSkillDescriptor | null;
   isStreaming: boolean;
   editingPromptMessageId: string | null;
   onDraft: (value: string) => void;
@@ -2279,6 +2748,9 @@ interface ChatWorkspaceProps {
   onRemoveAttachment: (attachmentId: string) => void;
   onSend: (event?: FormEvent) => void;
   onToggleReasoning: () => void;
+  onToggleAgent: () => void;
+  onToggleWebSearch: () => void;
+  onSelectSkill: (skill: LocalSkillDescriptor | null) => void;
   onStop: () => void;
   onCopy: (message: ChatMessage) => void;
   onRegenerate: () => void;
@@ -2297,6 +2769,11 @@ function ChatWorkspace({
   inputTypes,
   reasoningAvailable,
   reasoningEnabled,
+  agentAvailable,
+  agentEnabled,
+  webSearchEnabled,
+  availableSkills,
+  selectedSkill,
   isStreaming,
   editingPromptMessageId,
   onDraft,
@@ -2304,6 +2781,9 @@ function ChatWorkspace({
   onRemoveAttachment,
   onSend,
   onToggleReasoning,
+  onToggleAgent,
+  onToggleWebSearch,
+  onSelectSkill,
   onStop,
   onCopy,
   onRegenerate,
@@ -2313,8 +2793,49 @@ function ChatWorkspace({
 }: ChatWorkspaceProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [codeMode, setCodeMode] = useState(false);
   const [previewImage, setPreviewImage] = useState<ChatAttachment | null>(null);
+  const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+
+  const slashMenuOpen =
+    !selectedSkill && draft.startsWith("/") && !draft.includes("\n");
+  const slashQuery = slashMenuOpen
+    ? draft.slice(1).trim().toLocaleLowerCase("zh-CN")
+    : "";
+  const slashSkills = useMemo(
+    () =>
+      availableSkills.filter((skill) => {
+        if (!skill.runtimeReady) return false;
+        if (!slashQuery) return true;
+        return [skill.displayName, skill.name, skill.description].some((value) =>
+          value.toLocaleLowerCase("zh-CN").includes(slashQuery),
+        );
+      }),
+    [availableSkills, slashQuery],
+  );
+
+  useEffect(() => {
+    setSlashActiveIndex(0);
+  }, [slashQuery, slashSkills.length]);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight) || 20;
+    const minimum = Math.ceil(lineHeight + 8);
+    const maximum = Math.ceil(lineHeight * 5 + 8);
+    const height = Math.min(maximum, Math.max(minimum, textarea.scrollHeight));
+    textarea.style.height = `${height}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maximum ? "auto" : "hidden";
+  }, [draft]);
+
+  const chooseSlashSkill = (skill: LocalSkillDescriptor) => {
+    onSelectSkill(skill);
+    onDraft("");
+    window.setTimeout(() => textareaRef.current?.focus(), 0);
+  };
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: isStreaming ? "auto" : "smooth" });
@@ -2390,6 +2911,12 @@ function ChatWorkspace({
                           : "你"}
                       </strong>
                       <span>{message.meta}</span>
+                      {message.role === "user" && message.skill && (
+                        <span className="message-skill-badge">
+                          <span className="slash-glyph" aria-hidden="true">/</span>
+                          {message.skill.name}
+                        </span>
+                      )}
                     </div>
                     {message.role === "assistant" && message.reasoning && (
                       <ReasoningPanel
@@ -2401,6 +2928,15 @@ function ChatWorkspace({
                         }
                       />
                     )}
+                    {message.role === "assistant" && message.agentSteps?.length ? (
+                      <AgentActivity
+                        steps={message.agentSteps}
+                        isStreaming={
+                          isStreaming &&
+                          message === messages[messages.length - 1]
+                        }
+                      />
+                    ) : null}
                     <div className="message-copy">
                       {message.content ? (
                         <Suspense
@@ -2492,6 +3028,37 @@ function ChatWorkspace({
       </div>
 
       <div className="composer-zone">
+        {slashMenuOpen && (
+          <section className="skill-slash-picker" aria-label="选择 Skill">
+            <div className="skill-slash-heading">
+              <span><span className="slash-glyph" aria-hidden="true">/</span>调用 Skill</span>
+              <small>↑↓ 选择 · Enter 调用 · Esc 关闭</small>
+            </div>
+            <div id="skill-slash-list" role="listbox" aria-label="可用 Skill">
+              {slashSkills.length ? slashSkills.map((skill, index) => (
+                <button
+                  id={`skill-slash-${skill.id}`}
+                  type="button"
+                  role="option"
+                  aria-selected={index === slashActiveIndex}
+                  className={index === slashActiveIndex ? "active" : ""}
+                  key={skill.id}
+                  onMouseEnter={() => setSlashActiveIndex(index)}
+                  onClick={() => chooseSlashSkill(skill)}
+                >
+                  <span><PuzzlePiece size={18} /></span>
+                  <span>
+                    <strong>{skill.displayName}</strong>
+                    <small>{skill.description}</small>
+                  </span>
+                  <code>/{skill.name}</code>
+                </button>
+              )) : (
+                <div className="skill-slash-empty">没有匹配的 Skill</div>
+              )}
+            </div>
+          </section>
+        )}
         {messages.length > 0 && !editingPromptMessageId && (
           <div className="quick-prompts" aria-label="快捷提示">
             {suggestions.map((suggestion) => (
@@ -2515,6 +3082,22 @@ function ChatWorkspace({
           </div>
         )}
         <form className={`composer ${codeMode ? "code-mode" : ""}`} onSubmit={onSend}>
+          {selectedSkill && (
+            <div className="composer-skill-chip">
+              <PuzzlePiece size={15} weight="fill" />
+              <span>
+                <small>加入当前对话</small>
+                <strong>{selectedSkill.displayName}</strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => onSelectSkill(null)}
+                aria-label={`取消调用 ${selectedSkill.displayName}`}
+              >
+                <X size={14} />
+              </button>
+            </div>
+          )}
           <DraftAttachmentStrip
             attachments={draftAttachments}
             onRemove={onRemoveAttachment}
@@ -2524,23 +3107,67 @@ function ChatWorkspace({
             输入消息
           </label>
           <textarea
+            ref={textareaRef}
             id="chat-input"
+            rows={1}
             value={draft}
             onChange={(event) => onDraft(event.target.value)}
             onKeyDown={(event) => {
+              if (slashMenuOpen) {
+                if (event.key === "ArrowDown") {
+                  event.preventDefault();
+                  setSlashActiveIndex((index) =>
+                    slashSkills.length ? (index + 1) % slashSkills.length : 0,
+                  );
+                  return;
+                }
+                if (event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setSlashActiveIndex((index) =>
+                    slashSkills.length
+                      ? (index - 1 + slashSkills.length) % slashSkills.length
+                      : 0,
+                  );
+                  return;
+                }
+                if (event.key === "Enter" || event.key === "Tab") {
+                  event.preventDefault();
+                  if (slashSkills.length) {
+                    chooseSlashSkill(slashSkills[slashActiveIndex] ?? slashSkills[0]);
+                  }
+                  return;
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onDraft("");
+                  return;
+                }
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
                 onSend();
               }
             }}
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={slashMenuOpen}
+            aria-controls={slashMenuOpen ? "skill-slash-list" : undefined}
+            aria-activedescendant={
+              slashMenuOpen && slashSkills.length
+                ? `skill-slash-${slashSkills[slashActiveIndex]?.id ?? slashSkills[0].id}`
+                : undefined
+            }
             placeholder={
               codeMode
                 ? `向 ${modelName} 提交代码问题…`
-                : reasoningEnabled
+                : agentEnabled
+                  ? webSearchEnabled
+                    ? `让 ${modelName} 使用 Agent 并联网处理…`
+                    : `让 ${modelName} 使用 Agent 处理…`
+                  : reasoningEnabled
                   ? `让 ${modelName} 深度思考…`
                   : `向 ${modelName} 提问…`
             }
-            rows={1}
           />
           <div className="composer-footer">
             <div className="composer-tools">
@@ -2574,50 +3201,97 @@ function ChatWorkspace({
               >
                 <Code size={18} />
               </button>
-              {reasoningAvailable && (
-                <button
-                  type="button"
-                  className={`composer-reasoning-toggle ${
-                    reasoningEnabled ? "active" : ""
-                  }`}
-                  aria-label={
-                    reasoningEnabled ? "关闭深度思考" : "开启深度思考"
-                  }
-                  aria-pressed={reasoningEnabled}
-                  title={
-                    reasoningEnabled
-                      ? "本次请求将使用深度思考"
-                      : "本次请求将直接生成回答"
-                  }
-                  onClick={onToggleReasoning}
-                  disabled={isStreaming}
-                >
-                  <Brain size={17} weight={reasoningEnabled ? "fill" : "regular"} />
-                  深度思考
-                </button>
-              )}
               <span>
                 <i /> {providerName} · {inputTypes.map((type) => MODEL_INPUT_TYPE_LABELS[type]).join(" / ")}
               </span>
             </div>
-            {isStreaming ? (
-              <button className="send-button stop-button" type="button" onClick={onStop} aria-label="停止生成">
-                <Stop size={15} weight="fill" />
-              </button>
-            ) : (
-              <button
-                className="send-button"
-                type="submit"
-                disabled={!draft.trim() && !draftAttachments.length}
-                aria-label={
-                  editingPromptMessageId
-                    ? "重新发送编辑后的提示词"
-                    : "发送消息"
-                }
-              >
-                <ArrowUp size={17} weight="bold" />
-              </button>
-            )}
+            <div className="composer-actions">
+              <div className="composer-mode-tools" aria-label="请求模式">
+                {agentAvailable && agentEnabled && (
+                  <button
+                    type="button"
+                    data-mode="web-search"
+                    className={`composer-reasoning-toggle composer-web-toggle ${
+                      webSearchEnabled ? "active" : ""
+                    }`}
+                    aria-label={webSearchEnabled ? "关闭联网搜索" : "开启联网搜索"}
+                    aria-pressed={webSearchEnabled}
+                    title={
+                      webSearchEnabled
+                        ? "模型已被告知可在 Agent 模式中联网搜索；搜索词会发送给搜索服务"
+                        : "允许 Agent 联网搜索；开启后会明确告知模型此权限"
+                    }
+                    onClick={onToggleWebSearch}
+                    disabled={isStreaming}
+                  >
+                    <Globe size={17} weight={webSearchEnabled ? "fill" : "regular"} />
+                    联网搜索
+                  </button>
+                )}
+                {agentAvailable && (
+                  <button
+                    type="button"
+                    data-mode="agent"
+                    className={`composer-reasoning-toggle composer-agent-toggle ${
+                      agentEnabled ? "active" : ""
+                    }`}
+                    aria-label={agentEnabled ? "关闭 Agent 模式" : "开启 Agent 模式"}
+                    aria-pressed={agentEnabled}
+                    title={
+                      agentEnabled
+                        ? "模型已被告知 Agent 模式已开启，可主动循环调用工具"
+                        : "开启后会明确告知模型可主动循环调用 Skill 与数据工具"
+                    }
+                    onClick={onToggleAgent}
+                    disabled={isStreaming}
+                  >
+                    <Robot size={17} weight={agentEnabled ? "fill" : "regular"} />
+                    Agent
+                  </button>
+                )}
+                {reasoningAvailable && (
+                  <button
+                    type="button"
+                    data-mode="reasoning"
+                    className={`composer-reasoning-toggle ${
+                      reasoningEnabled ? "active" : ""
+                    }`}
+                    aria-label={
+                      reasoningEnabled ? "关闭深度思考" : "开启深度思考"
+                    }
+                    aria-pressed={reasoningEnabled}
+                    title={
+                      reasoningEnabled
+                        ? "本次请求将使用深度思考"
+                        : "本次请求将直接生成回答"
+                    }
+                    onClick={onToggleReasoning}
+                    disabled={isStreaming}
+                  >
+                    <Brain size={17} weight={reasoningEnabled ? "fill" : "regular"} />
+                    深度思考
+                  </button>
+                )}
+              </div>
+              {isStreaming ? (
+                <button className="send-button stop-button" type="button" onClick={onStop} aria-label="停止生成">
+                  <Stop size={15} weight="fill" />
+                </button>
+              ) : (
+                <button
+                  className="send-button"
+                  type="submit"
+                  disabled={!draft.trim() && !draftAttachments.length}
+                  aria-label={
+                    editingPromptMessageId
+                      ? "重新发送编辑后的提示词"
+                      : "发送消息"
+                  }
+                >
+                  <ArrowUp size={17} weight="bold" />
+                </button>
+              )}
+            </div>
           </div>
         </form>
         <p className="composer-note">Enter 发送 · Shift + Enter 换行 · 模型输出可能不准确</p>
@@ -2839,6 +3513,7 @@ function SettingsWorkspace({
       capability: model.capability,
       inputTypes: model.inputTypes,
       supportsReasoning: model.supportsReasoning ?? false,
+      supportsAgent: model.supportsAgent ?? false,
     };
   };
 
@@ -3736,11 +4411,11 @@ type BootstrapState =
   | { status: "loading" }
   | {
       status: "auth";
-      runtime: { onlineMode: boolean; storage: string };
+      runtime: { onlineMode: boolean; storage: string; skillsEnabled: boolean };
     }
   | {
       status: "ready";
-      runtime: { onlineMode: boolean; storage: string };
+      runtime: { onlineMode: boolean; storage: string; skillsEnabled: boolean };
       user: AuthUser;
       state: PersistedAppState;
     }
@@ -3833,6 +4508,7 @@ function App() {
       key={bootstrap.user.id}
       user={bootstrap.user}
       initialState={bootstrap.state}
+      skillsEnabled={bootstrap.runtime.skillsEnabled}
       onLoggedOut={() => {
         setBootstrap({
           status: "auth",

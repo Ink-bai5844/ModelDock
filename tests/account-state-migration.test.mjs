@@ -38,6 +38,8 @@ test("new accounts omit ccode templates while existing template lists stay uncha
       join(outputDirectory, "accountState.js"),
     );
     const newAccount = createDefaultAppState();
+    assert.equal(newAccount.version, 9);
+    assert.deepEqual(newAccount.skillInvocationPolicies, {});
     assert.deepEqual(
       newAccount.customMappingTemplates.map((template) => template.id),
       [
@@ -71,6 +73,15 @@ test("new accounts omit ccode templates while existing template lists stay uncha
       existingIds,
       "an existing account must keep its saved templates",
     );
+    existingAccount.skillInvocationPolicies = {
+      "digital-me": "always",
+      "docs-helper": "manual",
+      broken: "sometimes",
+    };
+    assert.deepEqual(normalizeAppState(existingAccount).skillInvocationPolicies, {
+      "digital-me": "always",
+      "docs-helper": "manual",
+    });
 
     const existingWithoutCcode = createDefaultAppState();
     existingWithoutCcode.version = 4;
@@ -79,6 +90,32 @@ test("new accounts omit ccode templates while existing template lists stay uncha
       normalizedWithoutCcode.customMappingTemplates.map((template) => template.id),
       existingWithoutCcode.customMappingTemplates.map((template) => template.id),
       "normalization must not add ccode templates to an existing account",
+    );
+
+    const legacySkillConversation = createDefaultAppState();
+    legacySkillConversation.conversations[0].messages = [
+      {
+        id: "skill-on",
+        role: "user",
+        content: "你好",
+        skill: { id: "digital-me", name: "墨白" },
+      },
+      {
+        id: "skill-off",
+        role: "user",
+        content: "停止使用skill",
+      },
+      {
+        id: "after-stop",
+        role: "user",
+        content: "你好",
+      },
+    ];
+    delete legacySkillConversation.conversations[0].activeSkillIds;
+    assert.deepEqual(
+      normalizeAppState(legacySkillConversation).conversations[0].activeSkillIds,
+      [],
+      "legacy conversations must preserve an explicit stop-Skill request",
     );
   } finally {
     await rm(outputDirectory, { recursive: true, force: true });

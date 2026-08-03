@@ -19,9 +19,22 @@ import type {
 } from "./providers/provider.js";
 import { FileAccountStorage } from "./storage/file-account-storage.js";
 import { MySqlAccountStorage } from "./storage/mysql-account-storage.js";
+import {
+  isSkillInvocationPolicy,
+  LocalSkillRuntime,
+  type SkillInvocationPolicy,
+} from "./skills/local-skill-runtime.js";
+import {
+  extractPrivateTerms,
+  PrivateResponseGuard,
+  redactPrivateContent,
+} from "./skills/privacy-guard.js";
+import { AgentRuntime } from "./agent/agent-runtime.js";
+import { AgentDataWorkspace } from "./agent/data-workspace.js";
 
 const SESSION_COOKIE = "modeldock_session";
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
+const MAX_SKILL_ARCHIVE_BYTES = 160 * 1024 * 1024;
 
 interface UserState {
   configs?: ProviderConfig[];
@@ -34,6 +47,11 @@ interface ChatBody {
   temperature?: number;
   maxTokens?: number;
   reasoning?: boolean;
+  skillId?: string;
+  skillIds?: string[];
+  skillPolicies?: Record<string, SkillInvocationPolicy>;
+  agent?: boolean;
+  webSearch?: boolean;
 }
 
 function sendJson(
@@ -51,18 +69,23 @@ function sendJson(
 }
 
 async function readJson<T>(request: IncomingMessage): Promise<T> {
+  const buffer = await readBuffer(request, MAX_JSON_BYTES);
+  if (!buffer.length) return {} as T;
+  return JSON.parse(buffer.toString("utf8")) as T;
+}
+
+async function readBuffer(request: IncomingMessage, limit: number): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > MAX_JSON_BYTES) {
+    if (bytes > limit) {
       throw new AppError(413, "REQUEST_TOO_LARGE", "请求数据过大。");
     }
     chunks.push(buffer);
   }
-  if (!chunks.length) return {} as T;
-  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
+  return Buffer.concat(chunks);
 }
 
 function parseCookies(request: IncomingMessage): Record<string, string> {
@@ -99,6 +122,18 @@ function sessionCookie(
   ]
     .filter(Boolean)
     .join("; ");
+}
+
+function workspaceContentDisposition(
+  filePath: string,
+  download: boolean,
+): string {
+  const fileName = path.posix.basename(filePath.replace(/\\/g, "/"));
+  const encoded = encodeURIComponent(fileName).replace(
+    /['()*]/g,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+  return `${download ? "attachment" : "inline"}; filename*=UTF-8''${encoded}`;
 }
 
 function ensureAllowedOrigin(request: IncomingMessage, config: ModelDockConfig): void {
@@ -206,7 +241,16 @@ async function main(): Promise<void> {
   const sessions = new SessionManager(config.server.sessionHours * 60 * 60 * 1000);
   const vault = new AccountVault(storage, sessions, config.adminUsername);
   const providers = new ProviderGateway();
+  const localSkills = new LocalSkillRuntime({
+    ...config.skills,
+    directory: path.resolve(runtimeRoot, config.skills.directory),
+  });
+  const agentWorkspace = new AgentDataWorkspace(dataDirectory, {
+    quotaBytes: (accountId) => vault.getWorkspaceQuotaForAccount(accountId),
+  });
+  const agentRuntime = new AgentRuntime(agentWorkspace, localSkills);
   await vault.initialize();
+  await localSkills.initialize();
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -225,6 +269,7 @@ async function main(): Promise<void> {
         return sendJson(response, 200, {
           onlineMode: config.onlineMode,
           storage: config.onlineMode ? "MySQL" : "本地加密文件",
+          skillsEnabled: localSkills.enabled,
         });
       }
 
@@ -309,21 +354,131 @@ async function main(): Promise<void> {
       }
 
       if (request.method === "GET" && url.pathname === "/api/admin/accounts") {
+        const accounts = await vault.listAdminAccounts(sessionToken(request));
         return sendJson(response, 200, {
-          accounts: await vault.listAdminAccounts(sessionToken(request)),
+          accounts: await Promise.all(
+            accounts.map(async (account) => ({
+              ...account,
+              workspaceUsedBytes: (await agentWorkspace.snapshot(account.id)).usedBytes,
+            })),
+          ),
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/admin/skills") {
+        await vault.getAdminSession(sessionToken(request));
+        return sendJson(response, 200, {
+          skills: localSkills.enabled ? await localSkills.listCatalog() : [],
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/admin/skills") {
+        await vault.getAdminSession(sessionToken(request));
+        const archive = await readBuffer(request, MAX_SKILL_ARCHIVE_BYTES);
+        return sendJson(response, 201, {
+          skill: await localSkills.installArchive(archive),
+        });
+      }
+
+      const adminSkillPolicyMatch = url.pathname.match(
+        /^\/api\/admin\/skills\/([a-z0-9._-]+)\/policy$/,
+      );
+      if (request.method === "PATCH" && adminSkillPolicyMatch) {
+        await vault.getAdminSession(sessionToken(request));
+        const body = await readJson<{ policy?: unknown }>(request);
+        if (!isSkillInvocationPolicy(body.policy)) {
+          throw new AppError(400, "INVALID_SKILL_POLICY", "Skill 调用策略无效。");
+        }
+        return sendJson(response, 200, {
+          skill: await localSkills.setDefaultInvocationPolicy(
+            adminSkillPolicyMatch[1],
+            body.policy,
+          ),
+        });
+      }
+
+      const adminSkillMatch = url.pathname.match(
+        /^\/api\/admin\/skills\/([a-z0-9._-]+)$/,
+      );
+      if (request.method === "PUT" && adminSkillMatch) {
+        await vault.getAdminSession(sessionToken(request));
+        const archive = await readBuffer(request, MAX_SKILL_ARCHIVE_BYTES);
+        return sendJson(response, 200, {
+          skill: await localSkills.installArchive(archive, adminSkillMatch[1]),
+        });
+      }
+      if (request.method === "DELETE" && adminSkillMatch) {
+        await vault.getAdminSession(sessionToken(request));
+        return sendJson(response, 200, {
+          deleted: await localSkills.deleteSkill(adminSkillMatch[1]),
         });
       }
 
       const adminAccountMatch = url.pathname.match(
         /^\/api\/admin\/accounts\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i,
       );
-      if (request.method === "DELETE" && adminAccountMatch) {
+      const adminWorkspaceQuotaMatch = url.pathname.match(
+        /^\/api\/admin\/accounts\/([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/workspace-quota$/i,
+      );
+      if (request.method === "PATCH" && adminWorkspaceQuotaMatch) {
+        const body = await readJson<{ quotaBytes?: unknown }>(request);
+        const account = await vault.updateWorkspaceQuotaAsAdmin(
+          sessionToken(request),
+          adminWorkspaceQuotaMatch[1],
+          body.quotaBytes,
+        );
         return sendJson(response, 200, {
-          deleted: await vault.deleteAccountAsAdmin(
-            sessionToken(request),
-            adminAccountMatch[1],
-          ),
+          account: {
+            ...account,
+            workspaceUsedBytes: (await agentWorkspace.snapshot(account.id)).usedBytes,
+          },
         });
+      }
+      if (request.method === "DELETE" && adminAccountMatch) {
+        const deleted = await vault.deleteAccountAsAdmin(
+          sessionToken(request),
+          adminAccountMatch[1],
+        );
+        await agentWorkspace.deleteWorkspace(deleted.id);
+        return sendJson(response, 200, {
+          deleted,
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/workspace") {
+        const user = vault.getSession(sessionToken(request));
+        return sendJson(response, 200, {
+          workspace: await agentWorkspace.snapshot(user.id),
+        });
+      }
+
+      if (url.pathname === "/api/workspace/file") {
+        const user = vault.getSession(sessionToken(request));
+        const requestedPath = url.searchParams.get("path");
+        if (!requestedPath) {
+          throw new AppError(400, "INVALID_AGENT_PATH", "缺少工作区文件路径。");
+        }
+        if (request.method === "DELETE") {
+          return sendJson(response, 200, {
+            deleted: await agentWorkspace.deleteFile(user.id, requestedPath),
+          });
+        }
+        if (request.method === "GET") {
+          const file = await agentWorkspace.fileDescriptor(user.id, requestedPath);
+          const download = url.searchParams.get("download") === "1";
+          response.writeHead(200, {
+            "content-type": file.mimeType,
+            "content-length": String(file.size),
+            "content-disposition": workspaceContentDisposition(file.path, download),
+            "cache-control": "private, no-store",
+            "x-content-type-options": "nosniff",
+            "last-modified": new Date(file.updatedAt).toUTCString(),
+          });
+          createReadStream(file.absolutePath)
+            .on("error", () => response.destroy())
+            .pipe(response);
+          return;
+        }
       }
 
       if (request.method === "GET" && url.pathname === "/api/state") {
@@ -339,6 +494,14 @@ async function main(): Promise<void> {
         }
         await vault.writeState(sessionToken(request), body.state);
         return sendJson(response, 200, { ok: true });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/skills/catalog") {
+        vault.getSession(sessionToken(request));
+        const skills = await localSkills.listCatalog();
+        return sendJson(response, 200, {
+          skills: skills.filter((skill) => skill.runtimeReady),
+        });
       }
 
       if (request.method === "POST" && url.pathname === "/api/providers/test") {
@@ -358,11 +521,49 @@ async function main(): Promise<void> {
 
       if (request.method === "POST" && url.pathname === "/api/chat") {
         const body = await readJson<ChatBody>(request);
-        if (!body.model || !Array.isArray(body.messages) || !body.messages.every(isGatewayMessage)) {
+        if (
+          !body.model ||
+          !Array.isArray(body.messages) ||
+          !body.messages.every(isGatewayMessage) ||
+          (body.skillId !== undefined && typeof body.skillId !== "string") ||
+          (body.skillIds !== undefined &&
+            (!Array.isArray(body.skillIds) ||
+              body.skillIds.length > 12 ||
+              !body.skillIds.every((id) => typeof id === "string"))) ||
+          (body.skillPolicies !== undefined &&
+            (!body.skillPolicies ||
+              typeof body.skillPolicies !== "object" ||
+              Array.isArray(body.skillPolicies) ||
+              Object.keys(body.skillPolicies).length > 12 ||
+              !Object.entries(body.skillPolicies).every(
+                ([id, policy]) =>
+                  /^[a-z0-9._-]{1,80}$/.test(id) &&
+                  isSkillInvocationPolicy(policy),
+              ))) ||
+          (body.agent !== undefined && typeof body.agent !== "boolean") ||
+          (body.webSearch !== undefined && typeof body.webSearch !== "boolean")
+        ) {
           throw new AppError(400, "INVALID_CHAT_REQUEST", "聊天请求缺少模型或消息列表。");
         }
-        const state = await vault.readState<UserState>(sessionToken(request));
+        const token = sessionToken(request);
+        const state = await vault.readState<UserState>(token);
+        const sessionUser = vault.getSession(token);
         const provider = providerFromState(state, body.configId);
+        const agentEnabled = body.agent === true;
+        const webSearchEnabled = agentEnabled && body.webSearch === true;
+        const requestedSkillIds = [
+          ...(body.skillIds ?? []),
+          ...(body.skillId ? [body.skillId] : []),
+        ];
+        const privateSkillActive = await localSkills.hasPrivateMemorySkill(
+          requestedSkillIds,
+        );
+        const privateTerms = privateSkillActive
+          ? extractPrivateTerms(body.messages)
+          : [];
+        const skillMessages = agentEnabled
+          ? []
+          : await localSkills.buildSystemMessages(body.skillId, body.messages);
         const controller = new AbortController();
         response.on("close", () => controller.abort());
         response.writeHead(200, {
@@ -373,33 +574,99 @@ async function main(): Promise<void> {
         });
         response.write(`event: ready\ndata: ${JSON.stringify({ ok: true })}\n\n`);
         try {
-          for await (const chunk of providers.streamChat(provider, {
-            model: body.model,
-            messages: body.messages,
-            temperature: body.temperature,
-            maxTokens: body.maxTokens,
-            reasoning:
-              typeof body.reasoning === "boolean"
-                ? body.reasoning
-                : undefined,
-            signal: controller.signal,
-          })) {
-            if (chunk.type === "text-delta") {
+          const streamModel = (messages: GatewayMessage[]) =>
+            providers.streamChat(provider, {
+              model: body.model!,
+              messages,
+              temperature: body.temperature,
+              maxTokens: body.maxTokens,
+              reasoning:
+                typeof body.reasoning === "boolean"
+                  ? body.reasoning
+                  : undefined,
+              signal: controller.signal,
+            });
+          const stream = agentEnabled
+            ? agentRuntime.run({
+                accountId: sessionUser.id,
+                messages: body.messages,
+                activeSkillIds: requestedSkillIds,
+                requiredSkillId: body.skillId,
+                skillPolicies: body.skillPolicies ?? {},
+                webSearchEnabled,
+                reasoningEnabled: body.reasoning === true,
+                signal: controller.signal,
+                streamModel,
+              })
+            : (async function* () {
+                for await (const chunk of streamModel([
+                  ...skillMessages,
+                  ...body.messages!,
+                ])) {
+                  yield { type: "chunk" as const, chunk };
+                }
+              })();
+          const privateResponse = privateSkillActive
+            ? new PrivateResponseGuard(privateTerms)
+            : undefined;
+          for await (const event of stream) {
+            if (event.type === "step") {
+              const step = privateSkillActive && event.step.detail
+                ? {
+                    ...event.step,
+                    detail: redactPrivateContent(event.step.detail, privateTerms),
+                  }
+                : event.step;
               response.write(
-                `data: ${JSON.stringify({ type: "delta", text: chunk.text })}\n\n`,
+                `data: ${JSON.stringify({ type: "agent-step", step })}\n\n`,
               );
-            } else if (chunk.type === "reasoning-delta") {
+            } else if (event.type === "skills") {
               response.write(
-                `data: ${JSON.stringify({ type: "reasoning", text: chunk.text })}\n\n`,
+                `data: ${JSON.stringify({
+                  type: "agent-skills",
+                  activeSkillIds: event.activeSkillIds,
+                })}\n\n`,
               );
+            } else if (event.chunk.type === "text-delta") {
+              if (privateResponse) privateResponse.appendText(event.chunk.text);
+              else {
+                response.write(
+                  `data: ${JSON.stringify({ type: "delta", text: event.chunk.text })}\n\n`,
+                );
+              }
+            } else if (event.chunk.type === "reasoning-delta") {
+              if (privateResponse) {
+                const notice = privateResponse.takeReasoningNotice();
+                if (notice) {
+                  response.write(
+                    `data: ${JSON.stringify({
+                      type: "reasoning",
+                      text: notice,
+                    })}\n\n`,
+                  );
+                }
+              } else {
+                response.write(
+                  `data: ${JSON.stringify({ type: "reasoning", text: event.chunk.text })}\n\n`,
+                );
+              }
             } else {
               response.write(
                 `data: ${JSON.stringify({
                   type: "attachment",
-                  attachment: chunk.attachment,
+                  attachment: event.chunk.attachment,
                 })}\n\n`,
               );
             }
+          }
+          const privateText = privateResponse?.flushText();
+          if (privateText) {
+            response.write(
+              `data: ${JSON.stringify({
+                type: "delta",
+                text: privateText,
+              })}\n\n`,
+            );
           }
           response.write(`event: done\ndata: ${JSON.stringify({ type: "done" })}\n\n`);
         } catch (error) {

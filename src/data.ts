@@ -105,6 +105,7 @@ export const INITIAL_CATALOG_MODELS: CatalogModel[] = Object.entries(MODEL_CATAL
       capability: model.capability,
       inputTypes: [...model.inputTypes],
       supportsReasoning: model.supportsReasoning ?? false,
+      supportsAgent: model.supportsAgent ?? false,
     })),
 );
 
