@@ -11,6 +11,7 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - [界面与功能](#界面与功能)
 - [支持的模型接口](#支持的模型接口)
 - [多模态文件支持](#多模态文件支持)
+- [文件工作区](#文件工作区)
 - [Skill目录](#skill目录)
 - [系统架构](#系统架构)
 - [快速开始](#快速开始)
@@ -30,6 +31,21 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 
 ## 界面与功能
 
+### 界面总览
+
+ModelDock 使用同一套工作台承载对话、文件、API 连接、模型目录与 Skill，并支持账号级浅色/深色模式和主题色配置。模型切换、历史记录和主要操作始终保持在同一界面中。
+
+<table>
+  <tr>
+    <td width="50%"><img src="./images/主页（浅色模式）.png" alt="ModelDock 浅色模式主页"></td>
+    <td width="50%"><img src="./images/主页（深色模式）.png" alt="ModelDock 深色模式主页"></td>
+  </tr>
+  <tr>
+    <td align="center">浅色模式</td>
+    <td align="center">深色模式、Agent 执行与文件交付</td>
+  </tr>
+</table>
+
 ### 登录与账号
 
 - 未登录时只能进入登录/注册页，不能访问聊天工作区。
@@ -43,6 +59,10 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 密码只保存 scrypt 摘要。账号工作区使用登录密码派生的密钥进行 AES-256-GCM 加密，API Key、模型配置、主题参数和聊天记录都包含在加密工作区中。登录后派生密钥仅存在于服务端内存会话中；服务重启后需要重新登录。
 
 > 忘记密码后无法恢复工作区内容。部署前应建立可靠的备份策略。
+
+<p align="center">
+  <img src="./images/登录页.png" alt="ModelDock 登录与注册页面" width="1100">
+</p>
 
 ### 聊天工作区
 
@@ -61,6 +81,12 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - Agent 模式可以单独开启联网搜索。关闭时服务端拒绝搜索工具调用，打开时模型会明确收到联网权限状态。
 - 聊天框会随换行向上扩展，最多完整显示五行；清空或恢复为单行后会自动收回。
 
+同一段对话中可以直接切换其他 API 或模型，已有上下文和消息记录不会因此拆分成新的会话。
+
+<p align="center">
+  <img src="./images/同一会话内支持切换模型.png" alt="同一会话中切换不同模型继续对话" width="760">
+</p>
+
 ### 历史聊天记录
 
 - 左侧栏按更新时间显示聊天记录和最近使用的模型/API。
@@ -68,6 +94,18 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 历史记录分页显示。
 - 支持进入批量管理模式，多选并一次删除多条记录。
 - 每个账号只会看到自己的聊天记录。
+
+### 文件工作区
+
+- 每个账号拥有独立的 Agent 文件目录和容量统计，默认配额为 100 MB。
+- 支持按名称检索、在线预览、下载和确认删除文件。
+- Markdown、普通文本、图片、音频、视频和 PDF 等常见格式可以直接打开预览。
+- Agent 本轮生成的多个文件会自动合并为一个 ZIP 聊天附件，同时保留在账号文件工作区中。
+- 管理员可以在 `/admin` 为不同账号单独调整工作区容量上限。
+
+<p align="center">
+  <img src="./images/工作区储存.png" alt="ModelDock 账号文件工作区" width="1100">
+</p>
 
 ### API 连接页
 
@@ -77,6 +115,10 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 可测试连接并读取目标接口返回的模型数量。
 - 可从统一模型目录中勾选此端点实际可用的模型。
 - API Key 不会写入映射模板；模板只保存端点地址和请求/响应映射。
+
+<p align="center">
+  <img src="./images/API连接界面.png" alt="ModelDock API 连接管理界面" width="1100">
+</p>
 
 ### 模型目录页
 
@@ -97,6 +139,10 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 
 新账号默认带有五个可编辑分组：OpenAI、Anthropic、Gemini、DeepSeek 和 Ollama。预置的模型名称与调用名只是初始目录数据，实际是否可用取决于所连接 API 的模型支持情况。
 
+<p align="center">
+  <img src="./images/模型目录界面.png" alt="ModelDock 模型目录管理界面" width="1100">
+</p>
+
 ### 请求映射模板
 
 自定义协议支持“手动配置”和“映射模板”两种方式。模板可以新增、修改、另存和删除，并保存当前 Base URL、推荐模型与全部映射字段。
@@ -110,6 +156,12 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 
 选择“不使用模板”不会清空当前配置，可以继续单独修改并只保存到当前 API 端点。
 已有账号会原样保留自己已经保存的模板；升级不会自动删除或补充模板。
+
+下图演示的是已有账号中保留的第三方编辑图模板。第三方模板仍可自行新增、修改或删除；新账号只会预置上面列出的四个 OpenAI 官方模板。
+
+<p align="center">
+  <img src="./images/自定义映射.png" alt="自定义请求映射与模板选择" width="760">
+</p>
 
 ### 外观与交互
 
@@ -127,6 +179,17 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 特效颜色可以跟随主题，也可以使用自定义颜色。
 - 支持减少动态效果的系统偏好。
 
+<table>
+  <tr>
+    <td width="32%" align="center"><img src="./images/自定义主题.png" alt="明暗模式与主题色设置"></td>
+    <td width="68%" align="center"><img src="./images/高级外观设置.png" alt="粒子、网格与背景动画高级设置"></td>
+  </tr>
+  <tr>
+    <td align="center">明暗模式与六套主题色</td>
+    <td align="center">实时预览的高级背景效果参数</td>
+  </tr>
+</table>
+
 ### 快捷命令
 
 点击顶部命令按钮或按 `Ctrl + /` 打开快捷命令，可快速：
@@ -137,9 +200,17 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - 打开模型目录
 - 切换界面主题
 
+<p align="center">
+  <img src="./images/快捷命令页.png" alt="ModelDock 快捷命令面板" width="620">
+</p>
+
 ### Skill目录
 
 Skill 是由管理员统一安装的服务器级能力，不属于单个账号。普通账号不能安装、更新、删除或填写服务器文件路径，但可以在“Skill目录”中为自己的账号设置每个 Skill 的调用策略。
+
+<p align="center">
+  <img src="./images/Skill目录界面.png" alt="ModelDock Skill目录和调用策略" width="1100">
+</p>
 
 - 管理员在 `/admin` 上传 ZIP 成品包进行安装，也可以对已有 Skill 原地更新、确认删除并设置默认调用策略。
 - ZIP 根目录或唯一的一级目录中必须包含带 `name`、`description` frontmatter 的 `SKILL.md`。
@@ -170,6 +241,17 @@ Agent 会被明确告知自己运行在 ModelDock 网页聊天中：用户看不
 - 数据文件：列出、读取、写入、检索和删除当前账号的 Agent 文本文件。
 - 联网搜索：仅当聊天框的“联网搜索”按钮打开时可用；搜索词会发送给外部搜索服务。
 
+<table>
+  <tr>
+    <td width="50%"><img src="./images/agent支持.png" alt="Agent 多轮工具调用与 ZIP 文件交付"></td>
+    <td width="50%"><img src="./images/联网搜索.png" alt="Agent 联网搜索与引用结果"></td>
+  </tr>
+  <tr>
+    <td align="center">多轮工具调用与 ZIP 成品交付</td>
+    <td align="center">按会话授权的联网搜索</td>
+  </tr>
+</table>
+
 文件工具没有 Shell、进程启动或任意宿主机路径能力。所有路径都被限制在：
 
 ```text
@@ -178,16 +260,18 @@ data/agent-workspaces/<account-id>/
 
 服务端会拒绝绝对路径、`..`、符号链接以及超过 256 KiB 的单个读写文件。不同账号使用独立目录，Agent 不能通过文件工具读取账号状态密文、其他账号数据或 `data/` 中的其他服务文件。单次自动交付最多包含 24 个文件、合计不超过 8 MiB；当前 Agent 每轮最多 8 次工具调用，因此通常会更早受到调用次数限制。
 
-联网搜索会并行调用 Google Custom Search JSON API 和 Bing 搜索，交错合并结果并按规范化后的直达 URL 去重，最多向 Agent 返回 10 条结果。Google 未配置或单一搜索源失败时，另一来源仍可正常返回；Google 与 Bing 都失败或都没有结果时，再尝试 DuckDuckGo HTML 搜索兜底。所有来源都只返回标题、直达链接和摘要，不提供任意网页抓取工具；单次响应上限为 2 MiB，总搜索超时为 20 秒。若所有搜索源都不可用，Agent 会收到明确的工具失败信息，不会把服务故障误报成“没有公开信息”。部署服务器需要允许 Node 容器访问外网 HTTPS。
+联网搜索优先调用 Brave Search API，失败或没有结果时继续调用 Tavily Search API；两个正式 API 都不可用或没有结果时，才并行尝试 Bing 与 DuckDuckGo 网页搜索作为最后兜底。Bing 与 DuckDuckGo 的结果会交错合并，并按规范化后的直达 URL 去重。所有来源最多向 Agent 返回 10 条标题、直达链接和摘要，不提供任意网页抓取工具；单一来源超时为 7 秒，单次响应上限为 2 MiB，总搜索超时为 20 秒。若所有搜索源都不可用，Agent 会收到明确的工具失败信息，不会把服务故障误报成“没有公开信息”。部署服务器需要允许 Node 容器访问外网 HTTPS。
 
-Google 搜索使用官方 Programmable Search Engine 接口，需要先创建可搜索整个网页的搜索引擎、启用 Custom Search JSON API，然后在服务器设置：
+Brave 与 Tavily 的 API Key 只由 Node 服务读取，不会返回到浏览器或保存进账号状态。在项目根目录的 `config.json` 中至少配置一个正式搜索源：
 
-```text
-MODELDOCK_GOOGLE_SEARCH_API_KEY=<Google API Key>
-MODELDOCK_GOOGLE_SEARCH_ENGINE_ID=<Programmable Search Engine ID / cx>
+```json
+"search": {
+  "braveApiKey": "<Brave Search API Key>",
+  "tavilyApiKey": "<Tavily API Key>"
+}
 ```
 
-这两个值只由 Node 服务读取，不会返回到浏览器或保存进账号状态。未设置时 Google 源会被跳过，Bing 与 DuckDuckGo 仍可使用。接口参数和响应格式参考 [Google Custom Search REST 文档](https://developers.google.com/custom-search/v1/using_rest)。
+`config.json` 已被 `.gitignore` 排除，不要把真实密钥复制到 `config.example.json`。未设置某个 Key 时会自动跳过对应来源；两个 Key 都未设置时仍会尝试 Bing 与 DuckDuckGo，但网页抓取容易受到机房 IP 验证或页面结构变化影响，不适合作为唯一生产搜索来源。接口参数和响应格式参考 [Brave Search API 文档](https://api-dashboard.search.brave.com/api-reference/web/search/get)与 [Tavily Search API 文档](https://docs.tavily.com/documentation/api-reference/endpoint/search)。
 
 ### 管理员界面
 
@@ -236,6 +320,12 @@ Base URL 应填写协议根地址，不要重复填写上表中的相对路径�
 - 单条消息附件总大小最大 18 MiB。
 - 附件会作为账号聊天记录的一部分保存，因此大量 Base64 文件会显著增加本地文件或 MySQL `LONGBLOB` 的体积。
 - 不同上游 API 对格式和大小还有自己的限制；ModelDock 的允许列表不代表目标模型一定接受该文件。
+
+图片生成与编辑接口返回的 URL 或 Base64 数据会统一转换为聊天附件并随对话保存。桌面端悬停显示预览提示，移动端直接点击图片进入全图预览，原图下载入口位于预览窗口中。
+
+<p align="center">
+  <img src="./images/图片生成.png" alt="ModelDock 图片生成结果" width="720">
+</p>
 
 ## 系统架构
 
@@ -408,6 +498,13 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
 | `skills.pythonExecutable` | string | `python` | 受支持的 Skill 上下文脚本使用的 Python 命令或绝对路径 |
 | `skills.allowScriptExecution` | boolean | `false` | 允许内置兼容运行时执行受支持的上下文脚本 |
 
+### `search` 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `search.braveApiKey` | string | 空字符串 | Brave Search API 服务端密钥；空值时跳过 Brave |
+| `search.tavilyApiKey` | string | 空字符串 | Tavily Search API 服务端密钥；空值时跳过 Tavily |
+
 配置示例：
 
 ```json
@@ -418,6 +515,10 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
     "directory": "./data/skills",
     "pythonExecutable": "python",
     "allowScriptExecution": true
+  },
+  "search": {
+    "braveApiKey": "",
+    "tavilyApiKey": ""
   }
 }
 ```
@@ -446,12 +547,10 @@ ModelDock 启动时必须能在项目运行目录读取 `config.json`。最小�
 | `MODELDOCK_SKILLS_PYTHON` | `skills.pythonExecutable` | `python` |
 | `MODELDOCK_SKILLS_ALLOW_SCRIPT_EXECUTION` | `skills.allowScriptExecution` | `true` |
 | `MODELDOCK_SKILLS_MEMORY_KEY` | 私有 Skill 记忆库解密密钥（32 字节 Base64 或 64 位十六进制） | 使用独立强随机密钥 |
-| `MODELDOCK_GOOGLE_SEARCH_API_KEY` | Google Custom Search API Key | 使用 Google Cloud 中受限的 API Key |
-| `MODELDOCK_GOOGLE_SEARCH_ENGINE_ID` | Google Programmable Search Engine ID（`cx`） | `012345678901234567890:example` |
 
 如果修改了 `mysql.passwordEnvironmentVariable`，实际环境变量名也要随之修改。例如设置为 `DB_PASSWORD` 后，程序会读取 `DB_PASSWORD`，而不是 `MODELDOCK_MYSQL_PASSWORD`。
 
-当前 `server.sessionHours` 和 `server.allowedOrigins` 没有环境变量覆盖项，需要写入 `config.json`。
+当前 `server.sessionHours`、`server.allowedOrigins` 和 `search` 没有环境变量覆盖项，需要写入 `config.json`。
 
 布尔环境变量只接受字符串 `true` 或 `false`。
 
@@ -683,8 +782,6 @@ MODELDOCK_SERVER_HOST=127.0.0.1
 MODELDOCK_SERVER_PORT=3000
 MODELDOCK_SECURE_COOKIES=true
 MODELDOCK_ADMIN_USERNAME=admin
-MODELDOCK_GOOGLE_SEARCH_API_KEY=<Google API Key，可选>
-MODELDOCK_GOOGLE_SEARCH_ENGINE_ID=<Google 搜索引擎 ID，可选>
 ```
 
 限制文件权限：

@@ -25,6 +25,10 @@ export interface ModelDockConfig {
     pythonExecutable: string;
     allowScriptExecution: boolean;
   };
+  search: {
+    braveApiKey: string;
+    tavilyApiKey: string;
+  };
 }
 
 export function readRequiredEnvironmentVariable(name: string): string {
@@ -58,6 +62,10 @@ const DEFAULT_CONFIG: ModelDockConfig = {
     directory: "./data/skills",
     pythonExecutable: "python",
     allowScriptExecution: false,
+  },
+  search: {
+    braveApiKey: "",
+    tavilyApiKey: "",
   },
 };
 
@@ -139,6 +147,14 @@ export async function loadConfig(projectRoot: string): Promise<ModelDockConfig> 
         process.env.MODELDOCK_SKILLS_DIRECTORY ??
         raw.skills?.directory ??
         DEFAULT_CONFIG.skills.directory,
+    },
+    search: {
+      braveApiKey:
+        raw.search?.braveApiKey ??
+        DEFAULT_CONFIG.search.braveApiKey,
+      tavilyApiKey:
+        raw.search?.tavilyApiKey ??
+        DEFAULT_CONFIG.search.tavilyApiKey,
     },
   };
 }

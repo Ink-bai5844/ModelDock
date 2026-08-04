@@ -11,7 +11,7 @@ import type {
   SkillInvocationPolicy,
 } from "../skills/local-skill-runtime.js";
 import { AgentDataWorkspace } from "./data-workspace.js";
-import { searchWeb } from "./web-search.js";
+import { searchWeb, type WebSearchConfig } from "./web-search.js";
 
 const MAX_TOOL_CALLS = 8;
 const MAX_TOOL_RESULT_CHARACTERS = 96_000;
@@ -293,6 +293,10 @@ export class AgentRuntime {
   constructor(
     private readonly workspace: AgentDataWorkspace,
     private readonly skills: LocalSkillRuntime,
+    private readonly webSearchConfig: WebSearchConfig = {
+      braveApiKey: "",
+      tavilyApiKey: "",
+    },
   ) {}
 
   async *run(options: AgentRunOptions): AsyncGenerator<AgentEvent> {
@@ -619,7 +623,7 @@ export class AgentRuntime {
         if (!options.webSearchEnabled) {
           throw new AppError(403, "WEB_SEARCH_DISABLED", "当前对话没有开启联网搜索。 ");
         }
-        return searchWeb(args.query, options.signal);
+        return searchWeb(args.query, this.webSearchConfig, options.signal);
       default:
         throw new AppError(400, "UNKNOWN_AGENT_TOOL", "模型请求了未知的 Agent 工具。 ");
     }

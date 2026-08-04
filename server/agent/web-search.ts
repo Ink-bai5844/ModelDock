@@ -4,6 +4,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_RESULTS = 10;
 const MAX_RESULTS_PER_SOURCE = 6;
 const SEARCH_TIMEOUT_MS = 20_000;
+const SOURCE_TIMEOUT_MS = 7_000;
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/138.0 Safari/537.36";
 
@@ -13,11 +14,26 @@ export interface WebSearchResult {
   snippet: string;
 }
 
-interface GoogleSearchResponse {
-  items?: Array<{
+export interface WebSearchConfig {
+  braveApiKey: string;
+  tavilyApiKey: string;
+}
+
+interface BraveSearchResponse {
+  web?: {
+    results?: Array<{
+      title?: unknown;
+      url?: unknown;
+      description?: unknown;
+    }>;
+  };
+}
+
+interface TavilySearchResponse {
+  results?: Array<{
     title?: unknown;
-    link?: unknown;
-    snippet?: unknown;
+    url?: unknown;
+    content?: unknown;
   }>;
 }
 
@@ -176,52 +192,107 @@ function parseBingResults(html: string): WebSearchResult[] {
   return results;
 }
 
-async function searchGoogle(
+async function searchBrave(
   query: string,
   signal: AbortSignal,
+  apiKeyInput: string,
 ): Promise<WebSearchResult[]> {
-  const apiKey = process.env.MODELDOCK_GOOGLE_SEARCH_API_KEY;
-  const searchEngineId = process.env.MODELDOCK_GOOGLE_SEARCH_ENGINE_ID;
-  if (!apiKey || !searchEngineId) {
-    throw new Error("Google Custom Search is not configured.");
+  const apiKey = apiKeyInput.trim();
+  if (!apiKey) {
+    throw new Error("Brave Search is not configured.");
   }
-  const url = new URL("https://customsearch.googleapis.com/customsearch/v1");
-  url.searchParams.set("key", apiKey);
-  url.searchParams.set("cx", searchEngineId);
+  const url = new URL("https://api.search.brave.com/res/v1/web/search");
   url.searchParams.set("q", query);
-  url.searchParams.set("num", String(MAX_RESULTS_PER_SOURCE));
-  url.searchParams.set("hl", "zh-CN");
-  url.searchParams.set("safe", "active");
-  url.searchParams.set("fields", "items(title,link,snippet)");
+  url.searchParams.set("count", String(MAX_RESULTS));
+  url.searchParams.set("country", "CN");
+  url.searchParams.set("search_lang", "zh-hans");
+  url.searchParams.set("safesearch", "moderate");
+  url.searchParams.set("spellcheck", "1");
   const response = await fetch(url, {
-    headers: { accept: "application/json" },
+    headers: {
+      accept: "application/json",
+      "X-Subscription-Token": apiKey,
+    },
     signal,
   });
   const source = await readLimitedBody(response);
   if (!response.ok) {
-    throw new Error(`Google returned HTTP ${response.status}.`);
+    throw new Error(`Brave Search returned HTTP ${response.status}.`);
   }
-  let payload: GoogleSearchResponse;
+  let payload: BraveSearchResponse;
   try {
-    payload = JSON.parse(source) as GoogleSearchResponse;
+    payload = JSON.parse(source) as BraveSearchResponse;
   } catch {
-    throw new Error("Google returned invalid JSON.");
+    throw new Error("Brave Search returned invalid JSON.");
   }
-  if (!Array.isArray(payload.items)) return [];
-  return payload.items.flatMap((item) => {
+  if (!Array.isArray(payload.web?.results)) return [];
+  return payload.web.results.flatMap((item) => {
     if (
       typeof item.title !== "string" ||
-      typeof item.link !== "string" ||
-      !isHttpUrl(item.link)
+      typeof item.url !== "string" ||
+      !isHttpUrl(item.url)
     ) {
       return [];
     }
     return [{
       title: decodeHtml(item.title),
-      url: item.link,
-      snippet: typeof item.snippet === "string" ? decodeHtml(item.snippet) : "",
+      url: item.url,
+      snippet: typeof item.description === "string" ? decodeHtml(item.description) : "",
     }];
-  }).slice(0, MAX_RESULTS_PER_SOURCE);
+  }).slice(0, MAX_RESULTS);
+}
+
+async function searchTavily(
+  query: string,
+  signal: AbortSignal,
+  apiKeyInput: string,
+): Promise<WebSearchResult[]> {
+  const apiKey = apiKeyInput.trim();
+  if (!apiKey) {
+    throw new Error("Tavily Search is not configured.");
+  }
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      authorization: `Bearer ${apiKey}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      search_depth: "basic",
+      max_results: MAX_RESULTS,
+      include_answer: false,
+      include_raw_content: false,
+      include_images: false,
+    }),
+    signal,
+  });
+  const source = await readLimitedBody(response);
+  if (!response.ok) {
+    throw new Error(`Tavily Search returned HTTP ${response.status}.`);
+  }
+  let payload: TavilySearchResponse;
+  try {
+    payload = JSON.parse(source) as TavilySearchResponse;
+  } catch {
+    throw new Error("Tavily Search returned invalid JSON.");
+  }
+  if (!Array.isArray(payload.results)) return [];
+  return payload.results.flatMap((item) => {
+    if (
+      typeof item.title !== "string" ||
+      typeof item.url !== "string" ||
+      !isHttpUrl(item.url)
+    ) {
+      return [];
+    }
+    return [{
+      title: decodeHtml(item.title),
+      url: item.url,
+      snippet: typeof item.content === "string" ? decodeHtml(item.content) : "",
+    }];
+  }).slice(0, MAX_RESULTS);
 }
 
 async function searchDuckDuckGo(
@@ -283,7 +354,11 @@ async function searchBing(
   return results;
 }
 
-export async function searchWeb(queryInput: unknown, signal?: AbortSignal): Promise<{
+export async function searchWeb(
+  queryInput: unknown,
+  config: WebSearchConfig,
+  signal?: AbortSignal,
+): Promise<{
   query: string;
   results: WebSearchResult[];
 }> {
@@ -293,36 +368,52 @@ export async function searchWeb(queryInput: unknown, signal?: AbortSignal): Prom
   const query = queryInput.trim().slice(0, 300);
   const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
   const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  let successfulSourceCount = 0;
 
-  const primaryResults = await Promise.allSettled([
-    searchGoogle(query, combinedSignal),
-    searchBing(query, combinedSignal),
+  const apiProviders = [
+    { search: searchBrave, apiKey: config.braveApiKey },
+    { search: searchTavily, apiKey: config.tavilyApiKey },
+  ];
+  for (const provider of apiProviders) {
+    try {
+      const providerSignal = AbortSignal.any([
+        combinedSignal,
+        AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+      ]);
+      const results = await provider.search(query, providerSignal, provider.apiKey);
+      successfulSourceCount += 1;
+      if (results.length) return { query, results };
+    } catch {
+      if (combinedSignal.aborted) {
+        throw new AppError(504, "WEB_SEARCH_TIMEOUT", "联网搜索超时或已取消。 ");
+      }
+    }
+  }
+
+  const htmlFallbackResults = await Promise.allSettled([
+    searchBing(query, AbortSignal.any([
+      combinedSignal,
+      AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+    ])),
+    searchDuckDuckGo(query, AbortSignal.any([
+      combinedSignal,
+      AbortSignal.timeout(SOURCE_TIMEOUT_MS),
+    ])),
   ]);
   if (combinedSignal.aborted) {
     throw new AppError(504, "WEB_SEARCH_TIMEOUT", "联网搜索超时或已取消。 ");
   }
-  const successfulPrimarySets = primaryResults.flatMap((result) =>
-    result.status === "fulfilled" ? [result.value] : [],
-  );
-  const mergedPrimaryResults = mergeResultSets([
-    primaryResults[0].status === "fulfilled" ? primaryResults[0].value : [],
-    primaryResults[1].status === "fulfilled" ? primaryResults[1].value : [],
-  ]);
-  if (mergedPrimaryResults.length) {
-    return { query, results: mergedPrimaryResults };
+  successfulSourceCount += htmlFallbackResults.filter(
+    (result) => result.status === "fulfilled",
+  ).length;
+  const mergedFallbackResults = mergeResultSets(htmlFallbackResults.map((result) =>
+    result.status === "fulfilled" ? result.value : [],
+  ));
+  if (mergedFallbackResults.length) {
+    return { query, results: mergedFallbackResults };
   }
+  if (successfulSourceCount > 0) return { query, results: [] };
 
-  try {
-    const fallbackResults = await searchDuckDuckGo(query, combinedSignal);
-    if (fallbackResults.length || successfulPrimarySets.length) {
-      return { query, results: fallbackResults };
-    }
-  } catch {
-    if (combinedSignal.aborted) {
-      throw new AppError(504, "WEB_SEARCH_TIMEOUT", "联网搜索超时或已取消。 ");
-    }
-    if (successfulPrimarySets.length) return { query, results: [] };
-  }
   throw new AppError(
     502,
     "WEB_SEARCH_UNAVAILABLE",

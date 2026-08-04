@@ -248,7 +248,7 @@ async function main(): Promise<void> {
   const agentWorkspace = new AgentDataWorkspace(dataDirectory, {
     quotaBytes: (accountId) => vault.getWorkspaceQuotaForAccount(accountId),
   });
-  const agentRuntime = new AgentRuntime(agentWorkspace, localSkills);
+  const agentRuntime = new AgentRuntime(agentWorkspace, localSkills, config.search);
   await vault.initialize();
   await localSkills.initialize();
 

@@ -19,129 +19,122 @@ function duckDuckGoFixture(targetUrl) {
     <a class="result__snippet">DuckDuckGo fallback summary.</a>`;
 }
 
-function withGoogleConfig() {
-  const previous = {
-    key: process.env.MODELDOCK_GOOGLE_SEARCH_API_KEY,
-    cx: process.env.MODELDOCK_GOOGLE_SEARCH_ENGINE_ID,
-  };
-  process.env.MODELDOCK_GOOGLE_SEARCH_API_KEY = "fixture-key";
-  process.env.MODELDOCK_GOOGLE_SEARCH_ENGINE_ID = "fixture-cx";
-  return () => {
-    if (previous.key === undefined) delete process.env.MODELDOCK_GOOGLE_SEARCH_API_KEY;
-    else process.env.MODELDOCK_GOOGLE_SEARCH_API_KEY = previous.key;
-    if (previous.cx === undefined) delete process.env.MODELDOCK_GOOGLE_SEARCH_ENGINE_ID;
-    else process.env.MODELDOCK_GOOGLE_SEARCH_ENGINE_ID = previous.cx;
-  };
-}
+const EMPTY_SEARCH_CONFIG = { braveApiKey: "", tavilyApiKey: "" };
 
-test("web search queries Google and Bing together and merges direct URLs", async () => {
-  const restoreConfig = withGoogleConfig();
+test("web search uses Brave first and returns normalized direct URLs", async () => {
+  const config = { braveApiKey: "brave-fixture", tavilyApiKey: "tavily-fixture" };
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ url, init });
+    assert.equal(url.startsWith("https://api.search.brave.com/res/v1/web/search"), true);
+    assert.equal(new Headers(init?.headers).get("X-Subscription-Token"), "brave-fixture");
+    return Response.json({
+      web: {
+        results: [{
+          title: "Brave result",
+          url: "https://openai.com/brave-result",
+          description: "Brave result summary.",
+        }],
+      },
+    });
+  };
+  try {
+    const result = await searchWeb("gpt5.6sol", config);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(result.results, [{
+      title: "Brave result",
+      url: "https://openai.com/brave-result",
+      snippet: "Brave result summary.",
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search falls back from Brave to Tavily", async () => {
+  const config = { braveApiKey: "brave-fixture", tavilyApiKey: "tavily-fixture" };
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    calls.push({ url, init });
+    if (url.startsWith("https://api.search.brave.com/")) {
+      return new Response("unavailable", { status: 503 });
+    }
+    assert.equal(url, "https://api.tavily.com/search");
+    assert.equal(new Headers(init?.headers).get("Authorization"), "Bearer tavily-fixture");
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      query: "latest ModelDock",
+      search_depth: "basic",
+      max_results: 10,
+      include_answer: false,
+      include_raw_content: false,
+      include_images: false,
+    });
+    return Response.json({
+      results: [{
+        title: "Tavily result",
+        url: "https://example.com/tavily",
+        content: "Tavily result summary.",
+      }],
+    });
+  };
+  try {
+    const result = await searchWeb("latest ModelDock", config);
+    assert.equal(calls.length, 2);
+    assert.equal(result.results[0].url, "https://example.com/tavily");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("web search uses Bing and DuckDuckGo together as the final fallback", async () => {
   const originalFetch = globalThis.fetch;
   const calls = [];
   globalThis.fetch = async (input) => {
     const url = String(input);
     calls.push(url);
-    if (url.startsWith("https://customsearch.googleapis.com/")) {
-      return Response.json({
-        items: [{
-          title: "Google result",
-          link: "https://openai.com/google-result",
-          snippet: "Google result summary.",
-        }],
-      });
-    }
     if (url.startsWith("https://www.bing.com/")) {
       return new Response(
-        bingFixture("https://openai.com/bing-result", "Bing result"),
-        { status: 200, headers: { "content-type": "text/html" } },
+        bingFixture("https://openai.com/shared/?utm_source=bing"),
+        { status: 200 },
       );
+    }
+    if (url.startsWith("https://html.duckduckgo.com/")) {
+      return new Response(duckDuckGoFixture("https://openai.com/shared"), { status: 200 });
     }
     throw new Error(`Unexpected search source: ${url}`);
   };
   try {
-    const result = await searchWeb("gpt5.6sol");
+    const result = await searchWeb("fallback query", EMPTY_SEARCH_CONFIG);
     assert.equal(calls.length, 2);
-    assert.equal(calls.some((url) => url.startsWith("https://customsearch.googleapis.com/")), true);
     assert.equal(calls.some((url) => url.startsWith("https://www.bing.com/")), true);
-    assert.deepEqual(
-      result.results.map((item) => item.url),
-      ["https://openai.com/google-result", "https://openai.com/bing-result"],
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-    restoreConfig();
-  }
-});
-
-test("web search deduplicates the same result returned by Google and Bing", async () => {
-  const restoreConfig = withGoogleConfig();
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    if (url.startsWith("https://customsearch.googleapis.com/")) {
-      return Response.json({
-        items: [{
-          title: "Google title",
-          link: "https://openai.com/shared/?utm_source=google",
-          snippet: "Google summary.",
-        }],
-      });
-    }
-    return new Response(
-      bingFixture("https://openai.com/shared", "Bing title"),
-      { status: 200 },
-    );
-  };
-  try {
-    const result = await searchWeb("shared result");
+    assert.equal(calls.some((url) => url.startsWith("https://html.duckduckgo.com/")), true);
     assert.equal(result.results.length, 1);
-    assert.equal(result.results[0].title, "Google title");
+    assert.equal(result.results[0].title, "Bing result");
   } finally {
     globalThis.fetch = originalFetch;
-    restoreConfig();
-  }
-});
-
-test("web search falls back to DuckDuckGo only when Google and Bing fail", async () => {
-  const restoreConfig = withGoogleConfig();
-  const originalFetch = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = async (input) => {
-    const url = String(input);
-    calls.push(url);
-    if (url.includes("duckduckgo.com")) {
-      return new Response(duckDuckGoFixture("https://example.com/fallback"), {
-        status: 200,
-      });
-    }
-    return new Response("unavailable", { status: 503 });
-  };
-  try {
-    const result = await searchWeb("fallback query");
-    assert.equal(calls.length, 3);
-    assert.equal(result.results[0].url, "https://example.com/fallback");
-  } finally {
-    globalThis.fetch = originalFetch;
-    restoreConfig();
   }
 });
 
 test("web search reports provider failure instead of a false empty result", async () => {
-  const restoreConfig = withGoogleConfig();
+  const config = { braveApiKey: "brave-fixture", tavilyApiKey: "tavily-fixture" };
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input) => {
     const url = String(input);
-    return url.includes("duckduckgo.com")
-      ? new Response('<input name="image-check_fixture">', { status: 202 })
-      : new Response("unavailable", { status: 503 });
+    if (url.includes("duckduckgo.com")) {
+      return new Response('<input name="image-check_fixture">', { status: 202 });
+    }
+    return new Response("unavailable", { status: 503 });
   };
   try {
     await assert.rejects(
-      searchWeb("OpenAI"),
+      searchWeb("OpenAI", config),
       (error) => error?.code === "WEB_SEARCH_UNAVAILABLE",
     );
   } finally {
     globalThis.fetch = originalFetch;
-    restoreConfig();
   }
 });
