@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { AppError, asAppError } from "../core/errors.js";
+import { createCodeModeSystemMessage } from "../chat/code-mode.js";
 import type {
   GatewayAttachment,
   GatewayChunk,
@@ -55,6 +56,7 @@ export interface AgentRunOptions {
   requiredSkillId?: string;
   skillPolicies?: Record<string, SkillInvocationPolicy>;
   webSearchEnabled: boolean;
+  codeModeEnabled: boolean;
   reasoningEnabled: boolean;
   signal?: AbortSignal;
   streamModel(messages: GatewayMessage[]): AsyncIterable<GatewayChunk>;
@@ -378,6 +380,7 @@ export class AgentRuntime {
         requiredSkillId,
         webSearchEnabled: options.webSearchEnabled,
       }),
+      ...(options.codeModeEnabled ? [createCodeModeSystemMessage(true)] : []),
     ];
     let toolCalls = 0;
     const deliveryFiles = new Set<string>();

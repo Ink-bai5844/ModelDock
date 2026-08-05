@@ -31,6 +31,7 @@ import {
 } from "./skills/privacy-guard.js";
 import { AgentRuntime } from "./agent/agent-runtime.js";
 import { AgentDataWorkspace } from "./agent/data-workspace.js";
+import { createCodeModeSystemMessage } from "./chat/code-mode.js";
 import {
   externalizeAccountStateAttachments,
   externalizeGatewayAttachment,
@@ -59,6 +60,7 @@ interface ChatBody {
   skillPolicies?: Record<string, SkillInvocationPolicy>;
   agent?: boolean;
   webSearch?: boolean;
+  codeMode?: boolean;
 }
 
 function sendJson(
@@ -601,7 +603,8 @@ async function main(): Promise<void> {
                   isSkillInvocationPolicy(policy),
               ))) ||
           (body.agent !== undefined && typeof body.agent !== "boolean") ||
-          (body.webSearch !== undefined && typeof body.webSearch !== "boolean")
+          (body.webSearch !== undefined && typeof body.webSearch !== "boolean") ||
+          (body.codeMode !== undefined && typeof body.codeMode !== "boolean")
         ) {
           throw new AppError(400, "INVALID_CHAT_REQUEST", "聊天请求缺少模型或消息列表。");
         }
@@ -616,6 +619,7 @@ async function main(): Promise<void> {
         );
         const agentEnabled = body.agent === true;
         const webSearchEnabled = agentEnabled && body.webSearch === true;
+        const codeModeEnabled = body.codeMode === true;
         const requestedSkillIds = [
           ...(body.skillIds ?? []),
           ...(body.skillId ? [body.skillId] : []),
@@ -659,6 +663,7 @@ async function main(): Promise<void> {
                 requiredSkillId: body.skillId,
                 skillPolicies: body.skillPolicies ?? {},
                 webSearchEnabled,
+                codeModeEnabled,
                 reasoningEnabled: body.reasoning === true,
                 signal: controller.signal,
                 streamModel,
@@ -666,6 +671,9 @@ async function main(): Promise<void> {
             : (async function* () {
                 for await (const chunk of streamModel([
                   ...skillMessages,
+                  ...(codeModeEnabled
+                    ? [createCodeModeSystemMessage(false)]
+                    : []),
                   ...hydratedMessages,
                 ])) {
                   yield { type: "chunk" as const, chunk };

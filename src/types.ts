@@ -166,8 +166,10 @@ export interface ConversationRecord {
   providerName: string;
   messages: ChatMessage[];
   activeSkillIds?: string[];
+  reasoningEnabled?: boolean;
   agentEnabled?: boolean;
   webSearchEnabled?: boolean;
+  codeMode?: boolean;
 }
 
 export interface AuthUser {

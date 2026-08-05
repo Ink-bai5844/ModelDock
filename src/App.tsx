@@ -285,13 +285,18 @@ function WorkspaceApp({
     null,
   );
   const [isStreaming, setIsStreaming] = useState(false);
-  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [reasoningEnabled, setReasoningEnabled] = useState(
+    initialConversation?.reasoningEnabled === true,
+  );
   const [agentEnabled, setAgentEnabled] = useState(
     initialConversation?.agentEnabled === true,
   );
   const [webSearchEnabled, setWebSearchEnabled] = useState(
     initialConversation?.agentEnabled === true &&
       initialConversation?.webSearchEnabled === true,
+  );
+  const [codeMode, setCodeMode] = useState(
+    initialConversation?.codeMode === true,
   );
   const [activeSkillIds, setActiveSkillIds] = useState<string[]>(
     conversationActiveSkillIds(initialConversation),
@@ -327,14 +332,6 @@ function WorkspaceApp({
   const agentAvailable = selectedModel?.supportsAgent === true;
   const agentActive = agentAvailable && agentEnabled;
   const webSearchActive = agentActive && webSearchEnabled;
-
-  useEffect(() => {
-    setReasoningEnabled(false);
-  }, [
-    selectedModel?.configId,
-    selectedModel?.id,
-    selectedModel?.supportsReasoning,
-  ]);
 
   useEffect(() => {
     if (agentAvailable) return;
@@ -445,13 +442,22 @@ function WorkspaceApp({
           ? {
               ...conversation,
               activeSkillIds,
+              reasoningEnabled: reasoningEnabled,
               agentEnabled: agentActive,
               webSearchEnabled: webSearchActive,
+              codeMode: codeMode,
             }
           : conversation,
       ),
     );
-  }, [activeConversationId, activeSkillIds, agentActive, webSearchActive]);
+  }, [
+    activeConversationId,
+    activeSkillIds,
+    agentActive,
+    codeMode,
+    reasoningEnabled,
+    webSearchActive,
+  ]);
 
   const saveFailureNotified = useRef(false);
   const saveErrorHandler = useRef<(error: unknown) => void>(() => undefined);
@@ -570,8 +576,10 @@ function WorkspaceApp({
           selectedModel?.providerName ?? existing?.providerName ?? "未选择 API",
         messages: nextMessages,
         activeSkillIds: [...new Set(nextActiveSkillIds)].slice(0, 12),
+        reasoningEnabled: reasoningEnabled,
         agentEnabled: agentActive,
         webSearchEnabled: webSearchActive,
+        codeMode: codeMode,
       };
       return [next, ...current.filter((conversation) => conversation.id !== conversationId)];
     };
@@ -599,6 +607,7 @@ function WorkspaceApp({
     const useReasoning = reasoningAvailable ? reasoningActive : undefined;
     const useAgent = agentActive;
     const useWebSearch = useAgent && webSearchActive;
+    const useCodeMode = codeMode;
     let currentActiveSkillIds = [...new Set(requestedActiveSkillIds)].slice(0, 12);
     const requestSkillPolicies = Object.fromEntries(
       [...new Set([
@@ -651,6 +660,7 @@ function WorkspaceApp({
           skillPolicies: requestSkillPolicies,
           agent: useAgent,
           webSearch: useWebSearch,
+          codeMode: useCodeMode,
         },
         controller.signal,
         (chunk) => {
@@ -913,11 +923,13 @@ function WorkspaceApp({
       );
     if (matchingConfig) setSelectedApiId(matchingConfig.id);
     setSelectedModelId(item.modelId);
+    setReasoningEnabled(conversation.reasoningEnabled === true);
     setAgentEnabled(conversation.agentEnabled === true);
     setWebSearchEnabled(
       conversation.agentEnabled === true &&
         conversation.webSearchEnabled === true,
     );
+    setCodeMode(conversation.codeMode === true);
     setActiveSkillIds(conversationActiveSkillIds(conversation));
     setActiveConversationId(item.id);
     messagesRef.current = conversation.messages;
@@ -940,6 +952,8 @@ function WorkspaceApp({
     setDraftAttachments([]);
     setSelectedDraftSkill(null);
     setActiveSkillIds([]);
+    setReasoningEnabled(false);
+    setCodeMode(false);
     setView("chat");
     setSidebarOpen(false);
   };
@@ -963,8 +977,10 @@ function WorkspaceApp({
       setDraftAttachments([]);
       setSelectedDraftSkill(null);
       setActiveSkillIds([]);
+      setReasoningEnabled(false);
       setAgentEnabled(false);
       setWebSearchEnabled(false);
+      setCodeMode(false);
       setView("chat");
     }
     setToast(`已删除 ${conversationIds.length} 条聊天记录`);
@@ -1242,6 +1258,7 @@ function WorkspaceApp({
             agentAvailable={agentAvailable}
             agentEnabled={agentActive}
             webSearchEnabled={webSearchActive}
+            codeMode={codeMode}
             availableSkills={skills}
             selectedSkill={selectedDraftSkill}
             isStreaming={isStreaming}
@@ -1267,6 +1284,9 @@ function WorkspaceApp({
             }}
             onToggleWebSearch={() =>
               setWebSearchEnabled((enabled) => !enabled)
+            }
+            onToggleCodeMode={() =>
+              setCodeMode((enabled) => !enabled)
             }
             onSelectSkill={setSelectedDraftSkill}
             onStop={stopStreaming}
@@ -2767,6 +2787,7 @@ interface ChatWorkspaceProps {
   agentAvailable: boolean;
   agentEnabled: boolean;
   webSearchEnabled: boolean;
+  codeMode: boolean;
   availableSkills: LocalSkillDescriptor[];
   selectedSkill: LocalSkillDescriptor | null;
   isStreaming: boolean;
@@ -2778,6 +2799,7 @@ interface ChatWorkspaceProps {
   onToggleReasoning: () => void;
   onToggleAgent: () => void;
   onToggleWebSearch: () => void;
+  onToggleCodeMode: () => void;
   onSelectSkill: (skill: LocalSkillDescriptor | null) => void;
   onStop: () => void;
   onCopy: (message: ChatMessage) => void;
@@ -2800,6 +2822,7 @@ function ChatWorkspace({
   agentAvailable,
   agentEnabled,
   webSearchEnabled,
+  codeMode,
   availableSkills,
   selectedSkill,
   isStreaming,
@@ -2811,6 +2834,7 @@ function ChatWorkspace({
   onToggleReasoning,
   onToggleAgent,
   onToggleWebSearch,
+  onToggleCodeMode,
   onSelectSkill,
   onStop,
   onCopy,
@@ -2822,7 +2846,6 @@ function ChatWorkspace({
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [codeMode, setCodeMode] = useState(false);
   const [previewImage, setPreviewImage] = useState<ChatAttachment | null>(null);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
 
@@ -2868,8 +2891,6 @@ function ChatWorkspace({
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: isStreaming ? "auto" : "smooth" });
   }, [messages, isStreaming]);
-
-  const suggestions = ["比较三个方案的权衡", "整理为实施清单", "找出潜在风险"];
 
   const lastAssistantMessageId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -3087,15 +3108,6 @@ function ChatWorkspace({
             </div>
           </section>
         )}
-        {messages.length > 0 && !editingPromptMessageId && (
-          <div className="quick-prompts" aria-label="快捷提示">
-            {suggestions.map((suggestion) => (
-              <button key={suggestion} onClick={() => onDraft(suggestion)}>
-                {suggestion}
-              </button>
-            ))}
-          </div>
-        )}
         {editingPromptMessageId && (
           <div className="prompt-edit-status" role="status">
             <PencilSimple size={16} />
@@ -3222,10 +3234,17 @@ function ChatWorkspace({
               <button
                 type="button"
                 className={codeMode ? "active" : ""}
-                aria-label="代码模式"
+                aria-label={codeMode ? "关闭代码模式" : "开启代码模式"}
                 aria-pressed={codeMode}
-                title="代码模式"
-                onClick={() => setCodeMode((enabled) => !enabled)}
+                title={
+                  codeMode
+                    ? agentEnabled
+                      ? "代码模式已开启：生成完整实现，文件任务由 Agent 写入工作区并打包为 ZIP"
+                      : "代码模式已开启：生成完整实现，并按文件输出可复制代码块"
+                    : "开启代码模式：让模型按可运行工程实现来回答"
+                }
+                onClick={onToggleCodeMode}
+                disabled={isStreaming}
               >
                 <Code size={18} />
               </button>

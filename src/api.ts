@@ -323,6 +323,7 @@ export async function streamChat(
     skillPolicies?: Record<string, SkillInvocationPolicy>;
     agent?: boolean;
     webSearch?: boolean;
+    codeMode?: boolean;
   },
   signal: AbortSignal,
   onChunk: (chunk: ChatStreamChunk) => void,

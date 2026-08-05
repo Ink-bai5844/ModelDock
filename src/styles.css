@@ -4824,33 +4824,6 @@ kbd {
   content: "";
 }
 
-.quick-prompts {
-  display: flex;
-  margin-bottom: 8px;
-  justify-content: center;
-  gap: 6px;
-}
-
-.quick-prompts button {
-  min-height: 29px;
-  padding: 0 10px;
-  color: var(--muted);
-  background: color-mix(in srgb, var(--surface-1) 92%, transparent);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 9px;
-  transition:
-    color 160ms ease,
-    background-color 160ms ease,
-    border-color 160ms ease;
-}
-
-.quick-prompts button:hover {
-  color: var(--text-soft);
-  background: var(--surface-2);
-  border-color: var(--border-strong);
-}
-
 .prompt-edit-status {
   display: grid;
   min-height: 48px;
@@ -7844,20 +7817,6 @@ kbd {
 
   .composer-zone {
     padding: 0 10px 9px;
-  }
-
-  .quick-prompts {
-    justify-content: flex-start;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .quick-prompts::-webkit-scrollbar {
-    display: none;
-  }
-
-  .quick-prompts button {
-    flex: none;
   }
 
   .composer {

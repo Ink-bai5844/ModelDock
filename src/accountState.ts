@@ -392,10 +392,12 @@ export function normalizeAppState(value: unknown): PersistedAppState {
                   ? conversation.messages
                   : [],
               ),
+          reasoningEnabled: conversation.reasoningEnabled === true,
           agentEnabled: conversation.agentEnabled === true,
           webSearchEnabled:
             conversation.agentEnabled === true &&
             conversation.webSearchEnabled === true,
+          codeMode: conversation.codeMode === true,
           messages: Array.isArray(conversation.messages)
             ? conversation.messages.map((message) => ({
                 ...message,
