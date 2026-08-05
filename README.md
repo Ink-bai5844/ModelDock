@@ -1233,7 +1233,7 @@ pnpm start
 - 确认账号具有建表和读写权限。
 - 检查 3306 端口、防火墙和容器网络。
 
-### MySQL binlog 几分钟就生成 1 GiB
+### MySQL binlog 快速堆积
 
 - 先确认已经升级到采用会话/消息分表和附件工作区引用的版本，并完成重新构建、重启。
 - 旧版会把包含 Base64 附件的完整账号密文反复写入一个 `LONGBLOB`；在 `ROW + FULL` 下，每次 UPDATE 都可能把大行的前后镜像写入 binlog。
@@ -1286,8 +1286,6 @@ ModelDock/
 ├── package.json
 └── vite.config.ts
 ```
-
-本地运行产生的 `config.json`、`data/`、`node_modules/`、`dist/`、`dist-server/`、日志和部署包都已在 `.gitignore` 中排除。
 
 ## 开源许可证
 
