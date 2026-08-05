@@ -15,6 +15,7 @@ export interface ChatAttachment {
   size: number;
   dataUrl?: string;
   url?: string;
+  workspacePath?: string;
 }
 
 export interface ModelOption {

@@ -13,6 +13,10 @@ import {
   normalizeWorkspaceQuotaBytes,
   type AccountRecord,
   type AccountStorage,
+  type EncryptedAccountStateBundle,
+  type EncryptedConversationState,
+  type EncryptedMessageState,
+  type EncryptedStatePart,
 } from "./account-storage.js";
 
 export interface MySqlAccountStorageOptions {
@@ -51,6 +55,33 @@ interface AccountRow extends RowDataPacket {
 
 interface StateRow extends RowDataPacket {
   account_id: string;
+  document_version: number;
+  algorithm: string;
+  iv: Buffer;
+  auth_tag: Buffer;
+  ciphertext: Buffer;
+}
+
+interface StateHashRow extends RowDataPacket {
+  content_hash: Buffer | null;
+}
+
+interface ConversationRow extends RowDataPacket {
+  conversation_id: string;
+  ordinal: number;
+  content_hash: Buffer;
+  document_version: number;
+  algorithm: string;
+  iv: Buffer;
+  auth_tag: Buffer;
+  ciphertext: Buffer;
+}
+
+interface MessageRow extends RowDataPacket {
+  conversation_id: string;
+  message_id: string;
+  ordinal: number;
+  content_hash: Buffer;
   document_version: number;
   algorithm: string;
   iv: Buffer;
@@ -149,6 +180,49 @@ export class MySqlAccountStorage implements AccountStorage {
           PRIMARY KEY (account_id),
           CONSTRAINT fk_modeldock_states_account
             FOREIGN KEY (account_id) REFERENCES modeldock_accounts(id)
+            ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+      await this.ensureStateContentHashColumn();
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS modeldock_conversations (
+          account_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+          conversation_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+          ordinal INT UNSIGNED NOT NULL,
+          revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
+          content_hash BINARY(32) NOT NULL,
+          document_version SMALLINT UNSIGNED NOT NULL,
+          algorithm VARCHAR(32) CHARACTER SET ascii NOT NULL,
+          iv VARBINARY(32) NOT NULL,
+          auth_tag VARBINARY(32) NOT NULL,
+          ciphertext LONGBLOB NOT NULL,
+          updated_at DATETIME(3) NOT NULL,
+          PRIMARY KEY (account_id, conversation_id),
+          KEY ix_modeldock_conversations_order (account_id, ordinal),
+          CONSTRAINT fk_modeldock_conversations_account
+            FOREIGN KEY (account_id) REFERENCES modeldock_accounts(id)
+            ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS modeldock_messages (
+          account_id CHAR(36) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+          conversation_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+          message_id VARCHAR(191) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+          ordinal INT UNSIGNED NOT NULL,
+          revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
+          content_hash BINARY(32) NOT NULL,
+          document_version SMALLINT UNSIGNED NOT NULL,
+          algorithm VARCHAR(32) CHARACTER SET ascii NOT NULL,
+          iv VARBINARY(32) NOT NULL,
+          auth_tag VARBINARY(32) NOT NULL,
+          ciphertext LONGBLOB NOT NULL,
+          updated_at DATETIME(3) NOT NULL,
+          PRIMARY KEY (account_id, conversation_id, message_id),
+          KEY ix_modeldock_messages_order (account_id, conversation_id, ordinal),
+          CONSTRAINT fk_modeldock_messages_conversation
+            FOREIGN KEY (account_id, conversation_id)
+            REFERENCES modeldock_conversations(account_id, conversation_id)
             ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
       `);
@@ -253,6 +327,54 @@ export class MySqlAccountStorage implements AccountStorage {
     }
   }
 
+  async readStateBundle(userId: string): Promise<{
+    root: EncryptedDocument;
+    conversations: EncryptedConversationState[];
+  }> {
+    try {
+      const [conversationRows, messageRows] = await Promise.all([
+        this.pool.execute<ConversationRow[]>(
+          `SELECT conversation_id, ordinal, content_hash, document_version,
+                  algorithm, iv, auth_tag, ciphertext
+           FROM modeldock_conversations
+           WHERE account_id = ?
+           ORDER BY ordinal ASC`,
+          [userId],
+        ),
+        this.pool.execute<MessageRow[]>(
+          `SELECT conversation_id, message_id, ordinal, content_hash,
+                  document_version, algorithm, iv, auth_tag, ciphertext
+           FROM modeldock_messages
+           WHERE account_id = ?
+           ORDER BY conversation_id ASC, ordinal ASC`,
+          [userId],
+        ),
+      ]);
+      const messages = new Map<string, EncryptedMessageState[]>();
+      for (const row of messageRows[0]) {
+        const current = messages.get(row.conversation_id) ?? [];
+        current.push({
+          id: row.message_id,
+          ordinal: row.ordinal,
+          payload: this.partFromRow(row),
+        });
+        messages.set(row.conversation_id, current);
+      }
+      return {
+        root: await this.readState(userId),
+        conversations: conversationRows[0].map((row) => ({
+          id: row.conversation_id,
+          ordinal: row.ordinal,
+          payload: this.partFromRow(row),
+          messages: messages.get(row.conversation_id) ?? [],
+        })),
+      };
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw this.asStorageError(error);
+    }
+  }
+
   async updateCredentials(
     account: AccountRecord,
     reencryptedState: EncryptedDocument,
@@ -308,6 +430,40 @@ export class MySqlAccountStorage implements AccountStorage {
     }
   }
 
+  async updateCredentialsBundle(
+    account: AccountRecord,
+    bundle: EncryptedAccountStateBundle,
+  ): Promise<void> {
+    const connection = await this.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [accountResult] = await connection.execute<ResultSetHeader>(
+        `UPDATE modeldock_accounts
+         SET password_algorithm = ?, password_salt = ?, password_hash = ?,
+             vault_salt = ?, updated_at = ?
+         WHERE id = ?`,
+        [
+          account.password.algorithm,
+          decodeBase64(account.password.salt, "password salt", 16),
+          decodeBase64(account.password.hash, "password hash", 32),
+          decodeBase64(account.vaultSalt, "vault salt", 16),
+          new Date(account.updatedAt),
+          account.id,
+        ],
+      );
+      if (accountResult.affectedRows !== 1) {
+        throw new AppError(404, "ACCOUNT_NOT_FOUND", "没有找到这个账号。");
+      }
+      await this.writeStateBundleWithConnection(connection, account.id, bundle);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback().catch(() => undefined);
+      throw error instanceof AppError ? error : this.asStorageError(error);
+    } finally {
+      connection.release();
+    }
+  }
+
   async writeState(userId: string, state: EncryptedDocument): Promise<void> {
     try {
       const [result] = await this.pool.execute<ResultSetHeader>(
@@ -339,6 +495,23 @@ export class MySqlAccountStorage implements AccountStorage {
     } catch (error) {
       if (error instanceof AppError) throw error;
       throw this.asStorageError(error);
+    }
+  }
+
+  async writeStateBundle(
+    userId: string,
+    bundle: EncryptedAccountStateBundle,
+  ): Promise<void> {
+    const connection = await this.getConnection();
+    try {
+      await connection.beginTransaction();
+      await this.writeStateBundleWithConnection(connection, userId, bundle);
+      await connection.commit();
+    } catch (error) {
+      await connection.rollback().catch(() => undefined);
+      throw error instanceof AppError ? error : this.asStorageError(error);
+    } finally {
+      connection.release();
     }
   }
 
@@ -602,6 +775,217 @@ export class MySqlAccountStorage implements AccountStorage {
     };
   }
 
+  private partFromRow(row: {
+    content_hash: Buffer;
+    document_version: number;
+    algorithm: string;
+    iv: Buffer;
+    auth_tag: Buffer;
+    ciphertext: Buffer;
+  }): EncryptedStatePart {
+    return {
+      fingerprint: row.content_hash.toString("base64"),
+      document: {
+        version: row.document_version as EncryptedDocument["version"],
+        algorithm: row.algorithm as EncryptedDocument["algorithm"],
+        iv: row.iv.toString("base64"),
+        tag: row.auth_tag.toString("base64"),
+        ciphertext: row.ciphertext.toString("base64"),
+      },
+    };
+  }
+
+  private async writeStateBundleWithConnection(
+    connection: PoolConnection,
+    userId: string,
+    bundle: EncryptedAccountStateBundle,
+  ): Promise<void> {
+    const [stateRows] = await connection.execute<StateHashRow[]>(
+      `SELECT content_hash
+       FROM modeldock_account_states
+       WHERE account_id = ?
+       LIMIT 1
+       FOR UPDATE`,
+      [userId],
+    );
+    if (!stateRows[0]) {
+      throw new AppError(500, "ACCOUNT_STATE_MISSING", "账号状态数据不存在。");
+    }
+    if (!this.hashMatches(stateRows[0].content_hash, bundle.root.fingerprint)) {
+      const document = bundle.root.document;
+      await connection.execute<ResultSetHeader>(
+        `UPDATE modeldock_account_states
+         SET revision = revision + 1,
+             content_hash = ?,
+             document_version = ?,
+             algorithm = ?,
+             iv = ?,
+             auth_tag = ?,
+             ciphertext = ?,
+             updated_at = UTC_TIMESTAMP(3)
+         WHERE account_id = ?`,
+        [
+          decodeBase64(bundle.root.fingerprint, "state fingerprint", 32),
+          document.version,
+          document.algorithm,
+          decodeBase64(document.iv, "iv", 12),
+          decodeBase64(document.tag, "tag", 16),
+          decodeBase64(document.ciphertext, "ciphertext"),
+          userId,
+        ],
+      );
+    }
+
+    const [conversationRows] = await connection.execute<ConversationRow[]>(
+      `SELECT conversation_id, ordinal, content_hash, document_version,
+              algorithm, iv, auth_tag, ciphertext
+       FROM modeldock_conversations
+       WHERE account_id = ?
+       FOR UPDATE`,
+      [userId],
+    );
+    const [messageRows] = await connection.execute<MessageRow[]>(
+      `SELECT conversation_id, message_id, ordinal, content_hash,
+              document_version, algorithm, iv, auth_tag, ciphertext
+       FROM modeldock_messages
+       WHERE account_id = ?
+       FOR UPDATE`,
+      [userId],
+    );
+    const existingConversations = new Map(
+      conversationRows.map((row) => [row.conversation_id, row]),
+    );
+    const existingMessages = new Map(
+      messageRows.map((row) => [`${row.conversation_id}\0${row.message_id}`, row]),
+    );
+    const expectedConversations = new Set(bundle.conversations.map((item) => item.id));
+    const expectedMessages = new Set<string>();
+
+    for (const conversation of bundle.conversations) {
+      const existing = existingConversations.get(conversation.id);
+      const document = conversation.payload.document;
+      if (!existing) {
+        await connection.execute<ResultSetHeader>(
+          `INSERT INTO modeldock_conversations (
+             account_id, conversation_id, ordinal, revision, content_hash,
+             document_version, algorithm, iv, auth_tag, ciphertext, updated_at
+           ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))`,
+          [
+            userId,
+            conversation.id,
+            conversation.ordinal,
+            decodeBase64(conversation.payload.fingerprint, "conversation fingerprint", 32),
+            document.version,
+            document.algorithm,
+            decodeBase64(document.iv, "iv", 12),
+            decodeBase64(document.tag, "tag", 16),
+            decodeBase64(document.ciphertext, "ciphertext"),
+          ],
+        );
+      } else if (
+        existing.ordinal !== conversation.ordinal ||
+        !this.hashMatches(existing.content_hash, conversation.payload.fingerprint)
+      ) {
+        await connection.execute<ResultSetHeader>(
+          `UPDATE modeldock_conversations
+           SET ordinal = ?, revision = revision + 1, content_hash = ?,
+               document_version = ?, algorithm = ?, iv = ?, auth_tag = ?,
+               ciphertext = ?, updated_at = UTC_TIMESTAMP(3)
+           WHERE account_id = ? AND conversation_id = ?`,
+          [
+            conversation.ordinal,
+            decodeBase64(conversation.payload.fingerprint, "conversation fingerprint", 32),
+            document.version,
+            document.algorithm,
+            decodeBase64(document.iv, "iv", 12),
+            decodeBase64(document.tag, "tag", 16),
+            decodeBase64(document.ciphertext, "ciphertext"),
+            userId,
+            conversation.id,
+          ],
+        );
+      }
+
+      for (const message of conversation.messages) {
+        const key = `${conversation.id}\0${message.id}`;
+        expectedMessages.add(key);
+        const existingMessage = existingMessages.get(key);
+        const messageDocument = message.payload.document;
+        if (!existingMessage) {
+          await connection.execute<ResultSetHeader>(
+            `INSERT INTO modeldock_messages (
+               account_id, conversation_id, message_id, ordinal, revision,
+               content_hash, document_version, algorithm, iv, auth_tag,
+               ciphertext, updated_at
+             ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(3))`,
+            [
+              userId,
+              conversation.id,
+              message.id,
+              message.ordinal,
+              decodeBase64(message.payload.fingerprint, "message fingerprint", 32),
+              messageDocument.version,
+              messageDocument.algorithm,
+              decodeBase64(messageDocument.iv, "iv", 12),
+              decodeBase64(messageDocument.tag, "tag", 16),
+              decodeBase64(messageDocument.ciphertext, "ciphertext"),
+            ],
+          );
+        } else if (
+          existingMessage.ordinal !== message.ordinal ||
+          !this.hashMatches(existingMessage.content_hash, message.payload.fingerprint)
+        ) {
+          await connection.execute<ResultSetHeader>(
+            `UPDATE modeldock_messages
+             SET ordinal = ?, revision = revision + 1, content_hash = ?,
+                 document_version = ?, algorithm = ?, iv = ?, auth_tag = ?,
+                 ciphertext = ?, updated_at = UTC_TIMESTAMP(3)
+             WHERE account_id = ? AND conversation_id = ? AND message_id = ?`,
+            [
+              message.ordinal,
+              decodeBase64(message.payload.fingerprint, "message fingerprint", 32),
+              messageDocument.version,
+              messageDocument.algorithm,
+              decodeBase64(messageDocument.iv, "iv", 12),
+              decodeBase64(messageDocument.tag, "tag", 16),
+              decodeBase64(messageDocument.ciphertext, "ciphertext"),
+              userId,
+              conversation.id,
+              message.id,
+            ],
+          );
+        }
+      }
+    }
+
+    for (const [conversationId] of existingConversations) {
+      if (expectedConversations.has(conversationId)) continue;
+      await connection.execute<ResultSetHeader>(
+        `DELETE FROM modeldock_conversations
+         WHERE account_id = ? AND conversation_id = ?`,
+        [userId, conversationId],
+      );
+    }
+    for (const [key, message] of existingMessages) {
+      if (
+        !expectedConversations.has(message.conversation_id) ||
+        expectedMessages.has(key)
+      ) continue;
+      await connection.execute<ResultSetHeader>(
+        `DELETE FROM modeldock_messages
+         WHERE account_id = ? AND conversation_id = ? AND message_id = ?`,
+        [userId, message.conversation_id, message.message_id],
+      );
+    }
+  }
+
+  private hashMatches(current: Buffer | null, fingerprint: string): boolean {
+    return Boolean(
+      current &&
+        current.equals(decodeBase64(fingerprint, "content fingerprint", 32)),
+    );
+  }
+
   private async getConnection(): Promise<PoolConnection> {
     try {
       return await this.pool.getConnection();
@@ -624,6 +1008,22 @@ export class MySqlAccountStorage implements AccountStorage {
        ADD COLUMN workspace_quota_bytes BIGINT UNSIGNED NOT NULL
        DEFAULT ${DEFAULT_WORKSPACE_QUOTA_BYTES}
        AFTER vault_salt`,
+    );
+  }
+
+  private async ensureStateContentHashColumn(): Promise<void> {
+    const [rows] = await this.pool.query<ColumnCountRow[]>(
+      `SELECT COUNT(*) AS count
+       FROM information_schema.columns
+       WHERE table_schema = DATABASE()
+         AND table_name = 'modeldock_account_states'
+         AND column_name = 'content_hash'`,
+    );
+    if (Number(rows[0]?.count ?? 0) > 0) return;
+    await this.pool.query(
+      `ALTER TABLE modeldock_account_states
+       ADD COLUMN content_hash BINARY(32) NULL
+       AFTER revision`,
     );
   }
 

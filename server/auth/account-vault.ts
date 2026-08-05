@@ -5,6 +5,7 @@ import {
   decryptJson,
   deriveVaultKey,
   encryptJson,
+  fingerprintJson,
   verifyPassword,
 } from "../core/crypto.js";
 import { AppError } from "../core/errors.js";
@@ -15,7 +16,14 @@ import {
   normalizeWorkspaceQuotaBytes,
   type AccountRecord,
   type AccountStorage,
+  type EncryptedAccountStateBundle,
 } from "../storage/account-storage.js";
+import {
+  isPartitionedRoot,
+  mergeAccountState,
+  partitionAccountState,
+  type PlainConversationState,
+} from "../storage/state-partition.js";
 import { SessionManager, type SessionContext } from "./session-manager.js";
 
 export interface AuthResult {
@@ -212,6 +220,7 @@ export class AccountVault {
     await this.serializedForUser(target.id, async () => {
       await this.storage.deleteAccount(target.id);
     });
+    this.stateFingerprints.delete(target.id);
     this.sessions.destroyUser(target.id);
     return { id: target.id, username: target.username };
   }
@@ -226,18 +235,25 @@ export class AccountVault {
 
   async readState<T>(token: string | undefined): Promise<T> {
     const session = this.sessions.require(token);
-    const encrypted = await this.storage.readState(session.user.id);
-    return decryptJson<T>(session.vaultKey, encrypted);
+    const state = await this.readPlainState(session);
+    this.stateFingerprints.set(
+      session.user.id,
+      fingerprintJson(session.vaultKey, state),
+    );
+    return state as T;
   }
 
   async writeState(token: string | undefined, state: unknown): Promise<void> {
     const userId = this.sessions.require(token).user.id;
     await this.serializedForUser(userId, async () => {
       const session = this.sessions.require(token);
-      await this.storage.writeState(
+      const fingerprint = fingerprintJson(session.vaultKey, state);
+      if (this.stateFingerprints.get(userId) === fingerprint) return;
+      await this.storage.writeStateBundle(
         session.user.id,
-        encryptJson(session.vaultKey, state),
+        this.encryptStateBundle(session.vaultKey, state),
       );
+      this.stateFingerprints.set(userId, fingerprint);
     });
   }
 
@@ -266,24 +282,25 @@ export class AccountVault {
         );
       }
 
-      const plaintextState = decryptJson<unknown>(
-        session.vaultKey,
-        await this.storage.readState(account.id),
-      );
+      const plaintextState = await this.readPlainState(session);
       const vaultSalt = createVaultSalt();
       const [passwordDigest, nextVaultKey] = await Promise.all([
         createPasswordDigest(newPassword),
         deriveVaultKey(newPassword, vaultSalt),
       ]);
       try {
-        await this.storage.updateCredentials(
+        await this.storage.updateCredentialsBundle(
           {
             ...account,
             password: passwordDigest,
             vaultSalt,
             updatedAt: new Date().toISOString(),
           },
-          encryptJson(nextVaultKey, plaintextState),
+          this.encryptStateBundle(nextVaultKey, plaintextState),
+        );
+        this.stateFingerprints.set(
+          account.id,
+          fingerprintJson(nextVaultKey, plaintextState),
         );
         return this.publicResult(this.sessions.rotate(token, nextVaultKey));
       } finally {
@@ -324,6 +341,66 @@ export class AccountVault {
   }
 
   private readonly userOperations = new Map<string, Promise<void>>();
+  private readonly stateFingerprints = new Map<string, string>();
+
+  private encryptStateBundle(
+    key: Buffer,
+    state: unknown,
+  ): EncryptedAccountStateBundle {
+    const partition = partitionAccountState(state);
+    return {
+      root: {
+        fingerprint: fingerprintJson(key, partition.root),
+        document: encryptJson(key, partition.root),
+      },
+      conversations: partition.conversations.map((conversation) => ({
+        id: conversation.id,
+        ordinal: conversation.ordinal,
+        payload: {
+          fingerprint: fingerprintJson(key, conversation.payload),
+          document: encryptJson(key, conversation.payload),
+        },
+        messages: conversation.messages.map((message) => ({
+          id: message.id,
+          ordinal: message.ordinal,
+          payload: {
+            fingerprint: fingerprintJson(key, message.payload),
+            document: encryptJson(key, message.payload),
+          },
+        })),
+      })),
+    };
+  }
+
+  private async readPlainState(
+    session: SessionContext,
+  ): Promise<Record<string, unknown>> {
+    const bundle = await this.storage.readStateBundle(session.user.id);
+    const root = decryptJson<Record<string, unknown>>(
+      session.vaultKey,
+      bundle.root,
+    );
+    if (!isPartitionedRoot(root)) return root;
+    const conversations: PlainConversationState[] = bundle.conversations.map(
+      (conversation) => ({
+        id: conversation.id,
+        ordinal: conversation.ordinal,
+        payload: decryptJson<Record<string, unknown>>(
+          session.vaultKey,
+          conversation.payload.document,
+        ),
+        messages: conversation.messages.map((message) => ({
+          id: message.id,
+          ordinal: message.ordinal,
+          payload: decryptJson<Record<string, unknown>>(
+            session.vaultKey,
+            message.payload.document,
+          ),
+        })),
+      }),
+    );
+    return mergeAccountState(root, conversations);
+  }
 
   private async serializedForUser<T>(
     userId: string,

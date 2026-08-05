@@ -81,20 +81,6 @@ export function inferAttachmentKind(file: Pick<File, "name" | "type">): ModelInp
   return "text";
 }
 
-function readAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => {
-      if (typeof reader.result === "string") resolve(reader.result);
-      else reject(new Error("文件读取结果无效。"));
-    });
-    reader.addEventListener("error", () => {
-      reject(reader.error ?? new Error("无法读取文件。"));
-    });
-    reader.readAsDataURL(file);
-  });
-}
-
 export async function fileToAttachment(
   file: File,
   allowedTypes: ModelInputType[],
@@ -106,17 +92,33 @@ export async function fileToAttachment(
   if (file.size > MAX_ATTACHMENT_BYTES) {
     throw new Error(`单个附件不能超过 ${formatBytes(MAX_ATTACHMENT_BYTES)}。`);
   }
-  return {
-    id: `attachment-${Date.now()}-${crypto.randomUUID()}`,
-    kind,
-    name: file.name,
-    mimeType: file.type || mimeTypeFromName(file.name, kind),
-    size: file.size,
-    dataUrl: await readAsDataUrl(file),
+  const id = `attachment-${Date.now()}-${crypto.randomUUID()}`;
+  const response = await fetch("/api/workspace/attachment", {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "content-type": file.type || mimeTypeFromName(file.name, kind),
+      "x-modeldock-attachment-id": id,
+      "x-modeldock-filename": encodeURIComponent(file.name),
+      "x-modeldock-kind": kind,
+    },
+    body: file,
+  });
+  const payload = (await response.json().catch(() => ({}))) as {
+    attachment?: ChatAttachment;
+    error?: { message?: string };
   };
+  if (!response.ok || !payload.attachment?.workspacePath) {
+    throw new Error(payload.error?.message ?? "附件保存到工作区失败。");
+  }
+  return payload.attachment;
 }
 
 export function attachmentSource(attachment: ChatAttachment): string | undefined {
+  if (attachment.workspacePath) {
+    const query = new URLSearchParams({ path: attachment.workspacePath });
+    return `/api/workspace/file?${query.toString()}`;
+  }
   return attachment.dataUrl ?? attachment.url;
 }
 

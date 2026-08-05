@@ -207,6 +207,10 @@ function normalizeAttachment(value: unknown): ChatAttachment | undefined {
         : 0,
     dataUrl: typeof attachment.dataUrl === "string" ? attachment.dataUrl : undefined,
     url: typeof attachment.url === "string" ? attachment.url : undefined,
+    workspacePath:
+      typeof attachment.workspacePath === "string"
+        ? attachment.workspacePath
+        : undefined,
   };
 }
 

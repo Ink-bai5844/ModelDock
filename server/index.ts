@@ -31,10 +31,17 @@ import {
 } from "./skills/privacy-guard.js";
 import { AgentRuntime } from "./agent/agent-runtime.js";
 import { AgentDataWorkspace } from "./agent/data-workspace.js";
+import {
+  externalizeAccountStateAttachments,
+  externalizeGatewayAttachment,
+  hydrateGatewayMessages,
+  storeWorkspaceAttachment,
+} from "./attachments/workspace-attachments.js";
 
 const SESSION_COOKIE = "modeldock_session";
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 const MAX_SKILL_ARCHIVE_BYTES = 160 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 12 * 1024 * 1024;
 
 interface UserState {
   configs?: ProviderConfig[];
@@ -181,7 +188,9 @@ function isGatewayAttachment(value: unknown): value is GatewayAttachment {
     typeof attachment.mimeType === "string" &&
     typeof attachment.size === "number" &&
     Number.isFinite(attachment.size) &&
-    (typeof attachment.dataUrl === "string" || typeof attachment.url === "string")
+    (typeof attachment.dataUrl === "string" ||
+      typeof attachment.url === "string" ||
+      typeof attachment.workspacePath === "string")
   );
 }
 
@@ -452,6 +461,41 @@ async function main(): Promise<void> {
         });
       }
 
+      if (request.method === "POST" && url.pathname === "/api/workspace/attachment") {
+        const user = vault.getSession(sessionToken(request));
+        const id = request.headers["x-modeldock-attachment-id"];
+        const encodedName = request.headers["x-modeldock-filename"];
+        const kind = request.headers["x-modeldock-kind"];
+        if (
+          typeof id !== "string" ||
+          typeof encodedName !== "string" ||
+          typeof kind !== "string" ||
+          !["text", "image", "video", "audio"].includes(kind)
+        ) {
+          throw new AppError(400, "INVALID_ATTACHMENT", "附件元数据无效。");
+        }
+        let name: string;
+        try {
+          name = decodeURIComponent(encodedName);
+        } catch {
+          throw new AppError(400, "INVALID_ATTACHMENT", "附件名称无效。");
+        }
+        const buffer = await readBuffer(request, MAX_ATTACHMENT_BYTES);
+        const attachment = await storeWorkspaceAttachment(
+          user.id,
+          {
+            id,
+            kind: kind as GatewayAttachment["kind"],
+            name,
+            mimeType: request.headers["content-type"] ?? "application/octet-stream",
+            size: buffer.byteLength,
+          },
+          buffer,
+          agentWorkspace,
+        );
+        return sendJson(response, 201, { attachment });
+      }
+
       if (url.pathname === "/api/workspace/file") {
         const user = vault.getSession(sessionToken(request));
         const requestedPath = url.searchParams.get("path");
@@ -482,8 +526,17 @@ async function main(): Promise<void> {
       }
 
       if (request.method === "GET" && url.pathname === "/api/state") {
+        const token = sessionToken(request);
+        const user = vault.getSession(token);
+        const currentState = await vault.readState(token);
+        const migrated = await externalizeAccountStateAttachments(
+          user.id,
+          currentState,
+          agentWorkspace,
+        );
+        if (migrated.changed) await vault.writeState(token, migrated.state);
         return sendJson(response, 200, {
-          state: await vault.readState(sessionToken(request)),
+          state: migrated.state,
         });
       }
 
@@ -492,7 +545,14 @@ async function main(): Promise<void> {
         if (!body.state || typeof body.state !== "object" || Array.isArray(body.state)) {
           throw new AppError(400, "INVALID_STATE", "账号状态必须是 JSON 对象。");
         }
-        await vault.writeState(sessionToken(request), body.state);
+        const token = sessionToken(request);
+        const user = vault.getSession(token);
+        const migrated = await externalizeAccountStateAttachments(
+          user.id,
+          body.state,
+          agentWorkspace,
+        );
+        await vault.writeState(token, migrated.state);
         return sendJson(response, 200, { ok: true });
       }
 
@@ -549,6 +609,11 @@ async function main(): Promise<void> {
         const state = await vault.readState<UserState>(token);
         const sessionUser = vault.getSession(token);
         const provider = providerFromState(state, body.configId);
+        const hydratedMessages = await hydrateGatewayMessages(
+          sessionUser.id,
+          body.messages,
+          agentWorkspace,
+        );
         const agentEnabled = body.agent === true;
         const webSearchEnabled = agentEnabled && body.webSearch === true;
         const requestedSkillIds = [
@@ -589,7 +654,7 @@ async function main(): Promise<void> {
           const stream = agentEnabled
             ? agentRuntime.run({
                 accountId: sessionUser.id,
-                messages: body.messages,
+                messages: hydratedMessages,
                 activeSkillIds: requestedSkillIds,
                 requiredSkillId: body.skillId,
                 skillPolicies: body.skillPolicies ?? {},
@@ -601,7 +666,7 @@ async function main(): Promise<void> {
             : (async function* () {
                 for await (const chunk of streamModel([
                   ...skillMessages,
-                  ...body.messages!,
+                  ...hydratedMessages,
                 ])) {
                   yield { type: "chunk" as const, chunk };
                 }
@@ -651,10 +716,15 @@ async function main(): Promise<void> {
                 );
               }
             } else {
+              const attachment = await externalizeGatewayAttachment(
+                sessionUser.id,
+                event.chunk.attachment,
+                agentWorkspace,
+              );
               response.write(
                 `data: ${JSON.stringify({
                   type: "attachment",
-                  attachment: event.chunk.attachment,
+                  attachment,
                 })}\n\n`,
               );
             }

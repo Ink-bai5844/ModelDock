@@ -87,6 +87,7 @@ import { ModelCatalogWorkspace } from "./ModelCatalogWorkspace";
 import { ReasoningPanel } from "./ReasoningPanel";
 import { SkillWorkspace } from "./SkillWorkspace";
 import { WorkspaceFiles } from "./WorkspaceFiles";
+import { StateSaveCoordinator } from "./state-save-coordinator";
 import { DEFAULT_CUSTOM_MAPPING } from "./mappingTemplates";
 import {
   acceptForInputTypes,
@@ -303,6 +304,7 @@ function WorkspaceApp({
     skill: LocalSkillDescriptor | null;
   } | null>(null);
   const messagesRef = useRef(messages);
+  const conversationsRef = useRef(conversations);
 
   const availableModels = useMemo(
     () =>
@@ -374,6 +376,10 @@ function WorkspaceApp({
   }, [messages]);
 
   useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
     if (!skillsEnabled) return;
     let cancelled = false;
     setSkillsLoading(true);
@@ -428,6 +434,8 @@ function WorkspaceApp({
       theme,
     ],
   );
+  const persistedStateRef = useRef(persistedState);
+  persistedStateRef.current = persistedState;
 
   useEffect(() => {
     if (!activeConversationId) return;
@@ -446,29 +454,34 @@ function WorkspaceApp({
   }, [activeConversationId, activeSkillIds, agentActive, webSearchActive]);
 
   const saveFailureNotified = useRef(false);
+  const saveErrorHandler = useRef<(error: unknown) => void>(() => undefined);
+  saveErrorHandler.current = (error) => {
+    if (error instanceof ClientApiError && error.status === 401) {
+      onLoggedOut();
+      return;
+    }
+    if (!saveFailureNotified.current) {
+      saveFailureNotified.current = true;
+      setToast(error instanceof Error ? error.message : "账号状态保存失败");
+    }
+  };
+  const stateSaver = useRef<StateSaveCoordinator<PersistedAppState> | null>(null);
+  if (!stateSaver.current) {
+    stateSaver.current = new StateSaveCoordinator(
+      saveUserState,
+      (error) => saveErrorHandler.current(error),
+    );
+  }
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void saveUserState(persistedState)
-        .then(() => {
-          saveFailureNotified.current = false;
-        })
-        .catch((error) => {
-          if (error instanceof ClientApiError && error.status === 401) {
-            onLoggedOut();
-            return;
-          }
-          if (!saveFailureNotified.current) {
-            saveFailureNotified.current = true;
-            setToast(error instanceof Error ? error.message : "账号状态保存失败");
-          }
-        });
-    }, isStreaming ? 900 : 420);
-    return () => window.clearTimeout(timer);
-  }, [isStreaming, onLoggedOut, persistedState]);
+    const saver = stateSaver.current!;
+    saver.setStreaming(isStreaming);
+    if (!isStreaming) saver.schedule(persistedState, 650);
+  }, [isStreaming, persistedState]);
 
   useEffect(
     () => () => {
       abortController.current?.abort();
+      stateSaver.current?.dispose();
     },
     [],
   );
@@ -532,7 +545,7 @@ function WorkspaceApp({
   ) => {
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
-    setConversations((current) => {
+    const updateConversations = (current: ConversationRecord[]) => {
       const existing = current.find((conversation) => conversation.id === conversationId);
       const preview =
         [...nextMessages]
@@ -561,7 +574,15 @@ function WorkspaceApp({
         webSearchEnabled: webSearchActive,
       };
       return [next, ...current.filter((conversation) => conversation.id !== conversationId)];
-    });
+    };
+    const nextConversations = updateConversations(conversationsRef.current);
+    conversationsRef.current = nextConversations;
+    setConversations(nextConversations);
+    persistedStateRef.current = {
+      ...persistedStateRef.current,
+      conversations: nextConversations,
+      activeConversationId: conversationId,
+    };
   };
 
   const startStreaming = async (
@@ -608,6 +629,13 @@ function WorkspaceApp({
       },
     ] satisfies ChatMessage[];
     commitConversation(conversationId, title, withPlaceholder, currentActiveSkillIds);
+    stateSaver.current!.setStreaming(true);
+    void stateSaver.current!
+      .flush(persistedStateRef.current)
+      .then(() => {
+        saveFailureNotified.current = false;
+      })
+      .catch((error) => saveErrorHandler.current(error));
     setIsStreaming(true);
     const controller = new AbortController();
     abortController.current = controller;
@@ -943,7 +971,7 @@ function WorkspaceApp({
   };
 
   const saveConfigs = async () => {
-    await saveUserState(persistedState);
+    await stateSaver.current!.flush(persistedStateRef.current);
     setToast("配置已保存");
   };
 
@@ -1060,7 +1088,7 @@ function WorkspaceApp({
   const handleLogout = async () => {
     stopStreaming();
     try {
-      await saveUserState(persistedState);
+      await stateSaver.current!.flush(persistedStateRef.current);
     } finally {
       await logout().catch(() => undefined);
       onLoggedOut();
@@ -1071,7 +1099,7 @@ function WorkspaceApp({
     currentPassword: string,
     newPassword: string,
   ) => {
-    await saveUserState(persistedState);
+    await stateSaver.current!.flush(persistedStateRef.current);
     await changePassword(currentPassword, newPassword);
     setToast("密码已更新");
   };

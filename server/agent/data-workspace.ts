@@ -23,6 +23,7 @@ const MAX_SEARCH_MATCHES = 80;
 const MAX_DELIVERY_FILES = 24;
 const MAX_DELIVERY_BYTES = 8 * 1024 * 1024;
 const MAX_WORKSPACE_LIST_ENTRIES = 2_000;
+const MAX_BINARY_READ_BYTES = 64 * 1024 * 1024;
 
 const WORKSPACE_MIME_TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
@@ -207,6 +208,20 @@ export class AgentDataWorkspace {
     return { path: toPortablePath(root, target), content, truncated: false };
   }
 
+  async readBinary(
+    accountId: string,
+    requestedPath: unknown,
+    maxBytes = MAX_BINARY_READ_BYTES,
+  ): Promise<Buffer> {
+    const root = await this.accountRoot(accountId);
+    const target = await this.resolveExisting(root, requestedPath, "file");
+    const info = await stat(target);
+    if (info.size > maxBytes) {
+      throw new AppError(413, "WORKSPACE_FILE_TOO_LARGE", "工作区文件超过本次读取上限。");
+    }
+    return readFile(target);
+  }
+
   async write(
     accountId: string,
     requestedPath: unknown,
@@ -252,6 +267,43 @@ export class AgentDataWorkspace {
     }
     await writeFile(target, content, { encoding: "utf8", flag: "w" });
     return { path: toPortablePath(root, target), bytes };
+    });
+  }
+
+  async writeBinary(
+    accountId: string,
+    requestedPath: unknown,
+    content: Buffer,
+  ): Promise<{ path: string; bytes: number }> {
+    return this.serializedWrite(accountId, async () => {
+      const root = await this.accountRoot(accountId);
+      const relative = normalizeRelativePath(requestedPath, "");
+      if (!relative || relative === ".") {
+        throw new AppError(400, "INVALID_AGENT_PATH", "请提供要写入的文件路径。");
+      }
+      const target = path.resolve(root, relative);
+      if (!isInside(root, target)) {
+        throw new AppError(400, "INVALID_AGENT_PATH", "文件路径不能离开账号工作区。");
+      }
+      await this.ensureSafeParents(root, path.dirname(target));
+      const existing = await lstat(target).catch(() => undefined);
+      if (existing?.isSymbolicLink() || existing?.isDirectory()) {
+        throw new AppError(400, "INVALID_AGENT_PATH", "不能写入链接或目录。");
+      }
+      const usage = await this.calculateUsage(root);
+      const quotaBytes = normalizeWorkspaceQuotaBytes(
+        await this.quotaBytes(accountId),
+      );
+      const projectedBytes = usage.bytes - (existing?.size ?? 0) + content.byteLength;
+      if (projectedBytes > quotaBytes) {
+        throw new AppError(
+          413,
+          "WORKSPACE_QUOTA_EXCEEDED",
+          "工作区容量不足，请删除部分文件或联系管理员调整容量。",
+        );
+      }
+      await writeFile(target, content, { flag: "w" });
+      return { path: toPortablePath(root, target), bytes: content.byteLength };
     });
   }
 

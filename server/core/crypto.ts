@@ -1,6 +1,7 @@
 import {
   createCipheriv,
   createDecipheriv,
+  createHmac,
   randomBytes,
   scrypt as scryptCallback,
   timingSafeEqual,
@@ -11,6 +12,7 @@ const scrypt = promisify(scryptCallback);
 const KEY_BYTES = 32;
 const IV_BYTES = 12;
 const AAD = Buffer.from("modeldock:user-state:v1", "utf8");
+const FINGERPRINT_CONTEXT = Buffer.from("modeldock:state-fingerprint:v1\0", "utf8");
 
 export interface PasswordDigest {
   algorithm: "scrypt";
@@ -70,6 +72,13 @@ export function encryptJson(key: Buffer, value: unknown): EncryptedDocument {
     tag: cipher.getAuthTag().toString("base64"),
     ciphertext: ciphertext.toString("base64"),
   };
+}
+
+export function fingerprintJson(key: Buffer, value: unknown): string {
+  return createHmac("sha256", key)
+    .update(FINGERPRINT_CONTEXT)
+    .update(JSON.stringify(value), "utf8")
+    .digest("base64");
 }
 
 export function decryptJson<T>(key: Buffer, document: EncryptedDocument): T {

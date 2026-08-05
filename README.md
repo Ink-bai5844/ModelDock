@@ -18,6 +18,7 @@ ModelDock 是一个用于统一连接、管理和调用多种 AI API 的多账�
 - [配置文件](#配置文件)
 - [环境变量](#环境变量)
 - [API 端点与自定义映射](#api-端点与自定义映射)
+- [账号状态与增量持久化](#账号状态与增量持久化)
 - [本地文件存储](#本地文件存储)
 - [MySQL 存储](#mysql-存储)
 - [从本地文件迁移到 MySQL](#从本地文件迁移到-mysql)
@@ -69,6 +70,8 @@ ModelDock 使用同一套工作台承载对话、文件、API 连接、模型目
 - 按已启用的 API 端点分组切换模型。
 - 只显示在当前 API 配置中勾选为可用的模型。
 - 使用 HTTP + SSE 流式显示模型回答。
+- 流式生成期间只更新浏览器界面，不会按文本分段反复保存账号状态；发送开始以及生成结束、停止或报错后才会落盘。
+- 状态保存使用串行队列、防抖和内容哈希去重，同一份状态不会并发提交或重复写入。
 - 支持停止生成、复制回答、重新生成最后一条回答。
 - 只允许编辑并重发最后一条用户提示词；文字和附件会一起恢复，重发后替换该提示词及其后续回答。
 - Markdown 使用 GitHub Flavored Markdown 渲染，兼容表格、列表、任务列表、代码块等常见 README 格式。
@@ -98,6 +101,7 @@ ModelDock 使用同一套工作台承载对话、文件、API 连接、模型目
 ### 文件工作区
 
 - 每个账号拥有独立的 Agent 文件目录和容量统计，默认配额为 100 MB。
+- 聊天上传附件和模型返回的 Base64 文件会保存到当前账号工作区；聊天记录仅保留文件引用，不再长期保存大段 Base64。
 - 支持按名称检索、在线预览、下载和确认删除文件。
 - Markdown、普通文本、图片、音频、视频和 PDF 等常见格式可以直接打开预览。
 - Agent 本轮生成的多个文件会自动合并为一个 ZIP 聊天附件，同时保留在账号文件工作区中。
@@ -318,10 +322,12 @@ Base URL 应填写协议根地址，不要重复填写上表中的相对路径�
 - 单个附件最大 12 MiB。
 - 单条消息最多 6 个附件。
 - 单条消息附件总大小最大 18 MiB。
-- 附件会作为账号聊天记录的一部分保存，因此大量 Base64 文件会显著增加本地文件或 MySQL `LONGBLOB` 的体积。
+- 浏览器选择文件后会先把原始内容上传到当前账号的 `data/agent-workspaces/<account-id>/attachments/`，聊天状态只保存 `workspacePath` 引用。
+- 发起模型请求时，服务端会在账号工作区边界内读取引用文件，并仅为本次上游请求还原成目标适配器需要的 Data URL 或 Multipart 文件。
+- 升级前已经保存在聊天记录中的 Base64 附件，会在该账号首次读取状态时自动迁入工作区并替换为引用。
 - 不同上游 API 对格式和大小还有自己的限制；ModelDock 的允许列表不代表目标模型一定接受该文件。
 
-图片生成与编辑接口返回的 URL 或 Base64 数据会统一转换为聊天附件并随对话保存。桌面端悬停显示预览提示，移动端直接点击图片进入全图预览，原图下载入口位于预览窗口中。
+图片生成与编辑接口返回的 URL 或 Base64 数据会统一转换为聊天附件。Base64 结果先写入账号工作区，再把引用加入对话；远程 URL 结果保留 URL。桌面端悬停显示预览提示，移动端直接点击图片进入全图预览，原图下载入口位于预览窗口中。
 
 <p align="center">
   <img src="./images/图片生成.png" alt="ModelDock 图片生成结果" width="720">
@@ -336,10 +342,11 @@ flowchart LR
   Node --> Auth["账号与会话"]
   Node --> Gateway["Provider Gateway"]
   Node --> Agent["Agent Runtime\nSkill + 数据工具 + 可选搜索"]
-  Auth --> Files["本地 data/\n账号索引 + 加密工作区"]
-  Auth --> MySQL["MySQL\n账号表 + 加密状态表"]
+  Auth --> Files["本地 data/\n根状态 + 加密会话/消息"]
+  Auth --> MySQL["MySQL\n账号 + 根状态 + 会话/消息表"]
   Agent --> Gateway
-  Agent --> AgentData["data/agent-workspaces\n账号独立文件"]
+  Agent --> AgentData["data/agent-workspaces\nAgent 文件 + 聊天附件"]
+  Node --> AgentData
   Gateway --> OpenAI["OpenAI Compatible"]
   Gateway --> Anthropic["Anthropic"]
   Gateway --> Gemini["Gemini"]
@@ -642,6 +649,36 @@ Base URL: https://api.example.com/v1
 
 图片编辑接口通常把请求编码改为 Multipart，并把上传附件字段设为目标接口要求的 `image` 或 `image[]`。
 
+## 账号状态与增量持久化
+
+ModelDock 不再把全部设置、所有会话、所有消息和附件内容反复覆盖到同一个大型密文中。服务端会把账号数据拆成三个层级，并继续为每一部分单独执行 AES-256-GCM 加密：
+
+1. **账号根状态**：API 配置、模型目录、主题参数、Skill 策略、当前会话 ID 等不属于消息正文的设置。
+2. **会话记录**：会话标题、最近模型/API、更新时间、Agent 与联网开关等会话级元数据。
+3. **消息记录**：每一条用户、助手或工具消息及其附件引用、思考内容和 Agent 步骤。
+
+浏览器端使用一个串行保存协调器管理 `/api/state`：
+
+- 非流式设置变更经过 650 ms 防抖后保存。
+- 模型流式输出期间禁止按文本、思考或 Agent 步骤分段保存。
+- 一轮聊天只在请求开始和最终完成、停止或报错后形成持久化边界。
+- 保存请求不会并发执行；等待期间出现多个新状态时只保留最新状态。
+- 浏览器使用 SHA-256 比较连续状态，服务端再使用账号密钥参与计算的 HMAC-SHA-256 指纹判断每个加密记录是否真的变化。
+
+MySQL 和本地文件模式都按记录指纹跳过未变化数据。正常追加一条模型回答时，通常只需要更新会话元数据和最后一条消息；切换主题时只更新根状态，不会重新加密全部历史消息。修改密码时因为账号派生密钥变化，会有意重新加密该账号的根状态、全部会话和消息。
+
+### 旧数据自动升级
+
+旧版本保存在 `state.enc.json` 或 `modeldock_account_states.ciphertext` 中的完整状态仍然可以读取。升级后的处理流程如下：
+
+1. 用户登录并首次请求 `/api/state`。
+2. 服务端使用当前登录会话解密旧状态。
+3. 将聊天中的 Base64 附件写入该账号文件工作区。
+4. 把根状态、会话和消息分别加密并写入新的分区存储。
+5. 返回已经替换为工作区引用的新状态，后续只做增量保存。
+
+自动升级不会要求数据库中保存明文密码。升级前应同时备份数据库和完整 `data/` 目录；包含大量历史附件的账号首次进入工作区可能需要更长时间，并需要足够的账号工作区配额。迁移完成前不要中断服务进程。
+
 ## 本地文件存储
 
 设置：
@@ -658,15 +695,27 @@ Base URL: https://api.example.com/v1
 ```text
 data/
 ├── accounts.json
+├── agent-workspaces/
+│   └── <account-uuid>/
+│       └── attachments/
 └── users/
     └── <account-uuid>/
-        └── state.enc.json
+        ├── state.enc.json
+        ├── state.fingerprint.json
+        └── conversations/
+            └── <conversation-id-sha256>/
+                ├── conversation.enc.json
+                └── messages/
+                    └── <message-id-sha256>.enc.json
 ```
 
 - `accounts.json` 保存账号名、密码摘要、派生参数和时间信息。
-- `state.enc.json` 保存经过 AES-256-GCM 加密的完整账号工作区。
-- 修改密码时使用临时事务文件，启动时会自动恢复未完成的密码轮换。
-- 文件以原子替换方式写入，尽量避免写入中断留下半份状态。
+- `state.enc.json` 只保存经过 AES-256-GCM 加密的账号根状态。
+- `conversations/` 中的会话元数据和消息分别加密；目录与文件名使用记录 ID 的 SHA-256，不直接把 ID 拼进文件路径。
+- `state.fingerprint.json` 与每个分区记录中的指纹用于跳过完全相同的写入，指纹不能用于解密内容。
+- `agent-workspaces/<account-uuid>/attachments/` 保存聊天上传文件与外置后的 Base64 模型输出，并计入账号工作区配额。
+- 修改密码时使用临时事务文件重新加密根状态、会话和消息，启动时会自动恢复未完成的密码轮换。
+- 密文文件以原子替换方式写入；首次从旧版单文件状态升级时，会先写会话和消息，最后切换根状态标记。
 
 本地模式适合个人使用、开发测试或单实例部署。不要让多个 ModelDock 进程同时写入同一个 `dataDirectory`。
 
@@ -677,8 +726,12 @@ MySQL 模式适合服务器部署或需要把账号数据放入数据库的场�
 | 表 | 用途 |
 | --- | --- |
 | `modeldock_accounts` | 账号名、密码摘要、派生参数和创建/更新时间 |
-| `modeldock_account_states` | 账号工作区的 AES-256-GCM 密文及版本号 |
+| `modeldock_account_states` | 账号根状态的 AES-256-GCM 密文、内容指纹及版本号 |
+| `modeldock_conversations` | 按账号和会话 ID 保存独立加密的会话元数据 |
+| `modeldock_messages` | 按账号、会话和消息 ID 保存独立加密的消息内容与附件引用 |
 | `modeldock_data_migrations` | 文件到 MySQL 迁移记录，避免重复导入 |
+
+`modeldock_conversations` 和 `modeldock_messages` 使用外键级联到账号表。保存时服务端会在同一个事务中比较 `content_hash`，只插入、更新或删除实际变化的记录。旧数据库启动新版服务后会自动给根状态表补充 `content_hash`，并创建缺失的会话与消息表。
 
 ### 创建数据库和用户
 
@@ -691,7 +744,7 @@ CREATE DATABASE modeldock
 
 CREATE USER 'modeldock'@'%' IDENTIFIED BY 'replace-with-a-strong-password';
 
-GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, INDEX, REFERENCES
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, INDEX, REFERENCES
   ON modeldock.*
   TO 'modeldock'@'%';
 
@@ -716,6 +769,33 @@ export MODELDOCK_MYSQL_PASSWORD='replace-with-a-strong-password'
 生产环境应使用面板环境变量、systemd `EnvironmentFile` 或容器 Secret，不要把数据库密码写入 `config.json`、启动脚本或 Git。
 
 启动时程序会先连接数据库并创建缺失表。数据库本身和数据库用户不会自动创建。
+
+### MySQL binlog 建议
+
+ModelDock 已通过分区存储和保存去重减少应用层写入；MySQL 使用行格式 binlog 时，生产环境还建议由数据库管理员启用最小行镜像：
+
+```sql
+SET PERSIST binlog_row_image = 'MINIMAL';
+
+SELECT @@GLOBAL.binlog_format,
+       @@GLOBAL.binlog_row_image,
+       @@GLOBAL.max_binlog_size,
+       @@GLOBAL.binlog_expire_logs_seconds;
+```
+
+`binlog_row_image=MINIMAL` 只减少行事件中未变化列的记录量，不能代替应用层增量保存。`max_binlog_size=1073741824` 只表示单个文件大约到 1 GiB 时轮转，不代表总日志量受到 1 GiB 限制。改变全局设置后应重启或重新连接 Node 数据库连接池，使已有连接也使用新配置。
+
+应根据备份和时间点恢复要求设置 `binlog_expire_logs_seconds`。需要提前释放空间时，先确认没有复制通道，并确认不再需要对应时间范围的时间点恢复：
+
+```sql
+SHOW REPLICA STATUS;
+SHOW BINARY LOGS;
+
+-- 仔细选择要保留的第一个日志文件；以下名称仅为示例。
+PURGE BINARY LOGS TO 'binlog.000123';
+```
+
+不要从 MySQL 数据目录直接删除 `binlog.*` 文件，否则 binlog 索引、复制或恢复链可能损坏。`SET PERSIST` 和 `PURGE BINARY LOGS` 应使用数据库管理员账号执行，不需要授予 ModelDock 应用账号这些管理权限。
 
 ## 从本地文件迁移到 MySQL
 
@@ -989,7 +1069,14 @@ mysqldump --single-transaction --routines --triggers \
   -u modeldock -p modeldock > modeldock-backup.sql
 ```
 
-同时备份服务器上的 `config.json` 和环境变量配置，但不要把它们提交到 GitHub。
+MySQL 只包含账号、设置、会话、消息和文件引用。还必须同时备份：
+
+- `data/agent-workspaces/`：聊天附件和 Agent 文件。
+- `skills.directory` 指向的目录：已安装 Skill、默认策略和私有记忆密文。
+- Skill 私有记忆密钥文件或对应 Secret；密钥应与 Skill 包备份分开保存。
+- 服务器上的 `config.json` 和环境变量配置。
+
+这些文件和密钥都不要提交到 GitHub。只恢复数据库而不恢复 `agent-workspaces`，历史消息仍然存在，但对应附件会显示为文件不存在。
 
 ### 从 GitHub 升级
 
@@ -1007,7 +1094,7 @@ pnpm build
 sudo systemctl restart modeldock
 ```
 
-升级前先备份数据。不要使用 `git reset --hard` 覆盖服务器上的未提交配置；`config.json` 和 `data/` 默认不会被 Git 跟踪。
+升级前先备份数据库和完整 `data/`。从旧版单 Blob 状态升级后，账号第一次进入工作区会自动外置附件并创建分区记录；确认登录、历史消息和附件都正常后再清理旧备份。不要使用 `git reset --hard` 覆盖服务器上的未提交配置；`config.json` 和 `data/` 默认不会被 Git 跟踪。
 
 ## 命令速查
 
@@ -1044,6 +1131,10 @@ sudo systemctl restart modeldock
 | DELETE | `/api/admin/accounts/:id` | 管理员删除普通账号 |
 | GET | `/api/state` | 读取当前账号工作区 |
 | PUT | `/api/state` | 保存当前账号工作区 |
+| GET | `/api/workspace` | 获取当前账号文件列表、用量与配额 |
+| POST | `/api/workspace/attachment` | 将聊天附件原始内容保存到当前账号工作区 |
+| GET | `/api/workspace/file?path=...` | 预览或下载当前账号工作区文件 |
+| DELETE | `/api/workspace/file?path=...` | 删除当前账号工作区文件 |
 | GET | `/api/skills/catalog` | 登录账号读取可用 Skill目录（不返回服务器路径） |
 | GET | `/api/admin/skills` | 管理员读取全局 Skill目录 |
 | POST | `/api/admin/skills` | 管理员上传 ZIP 并安装 Skill |
@@ -1142,6 +1233,15 @@ pnpm start
 - 确认账号具有建表和读写权限。
 - 检查 3306 端口、防火墙和容器网络。
 
+### MySQL binlog 几分钟就生成 1 GiB
+
+- 先确认已经升级到采用会话/消息分表和附件工作区引用的版本，并完成重新构建、重启。
+- 旧版会把包含 Base64 附件的完整账号密文反复写入一个 `LONGBLOB`；在 `ROW + FULL` 下，每次 UPDATE 都可能把大行的前后镜像写入 binlog。
+- 执行 `SELECT @@GLOBAL.binlog_row_image;`，生产环境建议设置为 `MINIMAL`；已有连接应在设置后重新连接。
+- 查看 `modeldock_account_states` 是否仍有异常大的旧密文。对应账号首次进入工作区后会自动拆分；迁移期间不要中断服务。
+- `max_binlog_size` 只控制轮转大小。先修复写入频率和大 Blob，再调整保留期。
+- 清理旧日志前确认没有复制通道，并确认时间点恢复范围；只能使用 `PURGE BINARY LOGS`，不要手动删除数据库目录中的文件。
+
 ### 修改 `config.json` 后没有生效
 
 - 修改配置后必须重启 Node 进程。
@@ -1158,6 +1258,8 @@ ModelDock/
 │   ├── start-background.mjs    # Windows 后台启动
 │   └── migrate-files-to-mysql.mjs
 ├── server/
+│   ├── agent/                  # Agent 循环、账号文件工作区与 ZIP 交付
+│   ├── attachments/            # 聊天附件外置、工作区引用与请求时还原
 │   ├── auth/                   # 账号、密码、管理员和会话
 │   ├── core/                   # 加密、Base64 与错误类型
 │   ├── providers/              # 各厂商适配器与自定义映射
@@ -1176,6 +1278,7 @@ ModelDock/
 │   ├── ReasoningPanel.tsx
 │   ├── ParticleField.tsx
 │   ├── accountState.ts         # 账号状态结构与版本迁移
+│   ├── state-save-coordinator.ts # 串行防抖、流式抑制和内容哈希去重
 │   ├── mappingTemplates.ts     # 内置自定义映射模板
 │   └── styles.css
 ├── tests/                      # Node 测试套件
