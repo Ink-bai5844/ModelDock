@@ -267,6 +267,14 @@ function latestUserText(messages: GatewayMessage[]): string {
 function requestsFileDelivery(messages: GatewayMessage[]): boolean {
   const text = latestUserText(messages);
   if (!text) return false;
+  const referencesExistingWork =
+    /(?:还记得|记得|回忆|上次|刚才|刚刚|之前|先前|已经|曾经).{0,48}(?:写|创建|生成|制作|实现|修改|代码|程序|脚本|文件|项目|网页|组件|报告|表格|幻灯片|内容)/i.test(text) ||
+    /(?:写|创建|生成|制作|实现|修改)(?:过|的).{0,32}(?:代码|程序|脚本|文件|项目|网页|组件|报告|表格|幻灯片|内容)/i.test(text);
+  const requestsAnotherArtifact =
+    /(?:修改|修复|重写|改写|补全|更新)(?![过的])/i.test(text) ||
+    /(?:重新|再)(?:写|创建|生成|制作|实现|发送|发|导出|打包)/i.test(text) ||
+    /(?:发给我|给我文件|提供下载|导出|打包)/i.test(text);
+  if (referencesExistingWork && !requestsAnotherArtifact) return false;
   return (
     /(?:写|创建|生成|制作|实现).{0,24}(?:程序|代码|脚本|文件|项目|网页|组件|报告|表格|幻灯片)/i.test(text) ||
     /修改.{0,24}(?:程序|代码|脚本|文件|配置文件)/i.test(text) ||

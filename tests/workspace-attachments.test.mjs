@@ -46,19 +46,34 @@ test("base64 chat attachments are externalized and hydrated through the account 
       version: 9,
       conversations: [{
         id: "conversation-1",
-        messages: [{
-          id: "message-1",
-          role: "user",
-          content: "file",
-          attachments: [{
-            id: "attachment-1",
-            kind: "text",
-            name: "sample.txt",
-            mimeType: "text/plain",
-            size: source.length,
-            dataUrl: `data:text/plain;base64,${source.toString("base64")}`,
-          }],
-        }],
+        messages: [
+          {
+            id: "message-1",
+            role: "user",
+            content: "file",
+            attachments: [{
+              id: "attachment-1",
+              kind: "text",
+              name: "sample.txt",
+              mimeType: "text/plain",
+              size: source.length,
+              dataUrl: `data:text/plain;base64,${source.toString("base64")}`,
+            }],
+          },
+          {
+            id: "message-2",
+            role: "assistant",
+            content: "download",
+            attachments: [{
+              id: "attachment-2",
+              kind: "text",
+              name: "result.zip",
+              mimeType: "application/zip",
+              size: source.length,
+              dataUrl: `data:application/zip;base64,${source.toString("base64")}`,
+            }],
+          },
+        ],
       }],
     };
 
@@ -75,6 +90,8 @@ test("base64 chat attachments are externalized and hydrated through the account 
       workspace,
     );
     assert.equal(hydrated[0].attachments[0].dataUrl, `data:text/plain;base64,${source.toString("base64")}`);
+    assert.equal(hydrated[1].attachments[0].dataUrl, undefined);
+    assert.match(hydrated[1].attachments[0].workspacePath, /^attachments\//);
 
     const repeated = await externalizeAccountStateAttachments("account-1", migrated.state, workspace);
     assert.equal(repeated.changed, false);

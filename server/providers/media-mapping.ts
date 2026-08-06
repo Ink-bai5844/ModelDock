@@ -66,14 +66,19 @@ export function textFromAttachment(attachment: GatewayAttachment): string {
   }
 }
 
+function inputAttachments(message: GatewayMessage): GatewayAttachment[] {
+  return message.role === "user" ? message.attachments ?? [] : [];
+}
+
 export function toOpenAiMessages(messages: GatewayMessage[]): Array<Record<string, unknown>> {
   return messages.map((message) => {
-    if (!message.attachments?.length) {
+    const attachments = inputAttachments(message);
+    if (!attachments.length) {
       return { role: message.role, content: message.content };
     }
     const content: Array<Record<string, unknown>> = [];
     if (message.content) content.push({ type: "text", text: message.content });
-    for (const attachment of message.attachments) {
+    for (const attachment of attachments) {
       if (attachment.kind === "image") {
         content.push({
           type: "image_url",
@@ -107,9 +112,10 @@ export function toOpenAiMessages(messages: GatewayMessage[]): Array<Record<strin
 export function toAnthropicContent(
   message: GatewayMessage,
 ): string | Array<Record<string, unknown>> {
-  if (!message.attachments?.length) return message.content;
+  const attachments = inputAttachments(message);
+  if (!attachments.length) return message.content;
   const content: Array<Record<string, unknown>> = [];
-  for (const attachment of message.attachments) {
+  for (const attachment of attachments) {
     if (attachment.kind === "image") {
       content.push({
         type: "image",
@@ -158,7 +164,7 @@ export function toAnthropicContent(
 export function toGeminiParts(message: GatewayMessage): Array<Record<string, unknown>> {
   const parts: Array<Record<string, unknown>> = [];
   if (message.content) parts.push({ text: message.content });
-  for (const attachment of message.attachments ?? []) {
+  for (const attachment of inputAttachments(message)) {
     if (attachment.dataUrl) {
       const { data, mimeType } = splitDataUrl(attachment.dataUrl);
       parts.push({
@@ -184,7 +190,7 @@ export function toGeminiParts(message: GatewayMessage): Array<Record<string, unk
 export function toOllamaMessage(message: GatewayMessage): Record<string, unknown> {
   const images: string[] = [];
   const textAttachments: string[] = [];
-  for (const attachment of message.attachments ?? []) {
+  for (const attachment of inputAttachments(message)) {
     if (attachment.kind === "image") {
       images.push(attachmentBase64(attachment));
     } else if (attachment.kind === "text") {

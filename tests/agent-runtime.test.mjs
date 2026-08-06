@@ -42,6 +42,63 @@ test("Agent data tools stay inside the account workspace under data", async () =
   }
 });
 
+test("asking about previously written code may read it without forcing a new download", async () => {
+  const root = await mkdtemp(join(tmpdir(), "modeldock-agent-code-followup-"));
+  try {
+    const workspace = new AgentDataWorkspace(root);
+    await workspace.write(
+      "account-a",
+      "sieve.py",
+      "def sieve(limit):\n    return []\n",
+    );
+    const runtime = new AgentRuntime(workspace, {
+      enabled: false,
+      async listCatalog() { return []; },
+    });
+    let modelTurn = 0;
+    const events = await collect(runtime.run({
+      accountId: "account-a",
+      messages: [
+        { role: "user", content: "写个素数筛" },
+        { role: "assistant", content: "已经写入 sieve.py 并打包。" },
+        { role: "user", content: "还记得你上次写的代码具体内容吗" },
+      ],
+      activeSkillIds: [],
+      webSearchEnabled: false,
+      codeModeEnabled: true,
+      reasoningEnabled: false,
+      async *streamModel(messages) {
+        modelTurn += 1;
+        if (modelTurn === 1) {
+          yield {
+            type: "text-delta",
+            text: `<modeldock_tool>${JSON.stringify({
+              name: "read_file",
+              arguments: { path: "sieve.py" },
+            })}</modeldock_tool>`,
+          };
+          return;
+        }
+        assert.match(messages.at(-1).content, /def sieve/);
+        yield {
+          type: "text-delta",
+          text: "记得，sieve.py 定义了 sieve(limit) 函数。",
+        };
+      },
+    }));
+
+    assert.equal(modelTurn, 2);
+    assert.ok(events.some(
+      (event) =>
+        event.type === "chunk" &&
+        event.chunk.type === "text-delta" &&
+        event.chunk.text.includes("sieve.py"),
+    ));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Agent writes respect each account workspace quota", async () => {
   const root = await mkdtemp(join(tmpdir(), "modeldock-agent-quota-"));
   try {

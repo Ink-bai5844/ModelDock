@@ -138,25 +138,26 @@ export async function hydrateGatewayMessages(
   workspace: AgentDataWorkspace,
 ): Promise<GatewayMessage[]> {
   return Promise.all(
-    messages.map(async (message) => ({
-      ...message,
-      attachments: message.attachments
-        ? await Promise.all(
-            message.attachments.map(async (attachment) => {
-              if (!attachment.workspacePath) return attachment;
-              const buffer = await workspace.readBinary(
-                accountId,
-                attachment.workspacePath,
-                MAX_ATTACHMENT_BYTES,
-              );
-              return {
-                ...attachment,
-                dataUrl: `data:${attachment.mimeType};base64,${buffer.toString("base64")}`,
-                url: undefined,
-              };
-            }),
-          )
-        : undefined,
-    })),
+    messages.map(async (message) => {
+      if (message.role !== "user" || !message.attachments?.length) return message;
+      return {
+        ...message,
+        attachments: await Promise.all(
+          message.attachments.map(async (attachment) => {
+            if (!attachment.workspacePath) return attachment;
+            const buffer = await workspace.readBinary(
+              accountId,
+              attachment.workspacePath,
+              MAX_ATTACHMENT_BYTES,
+            );
+            return {
+              ...attachment,
+              dataUrl: `data:${attachment.mimeType};base64,${buffer.toString("base64")}`,
+              url: undefined,
+            };
+          }),
+        ),
+      };
+    }),
   );
 }
